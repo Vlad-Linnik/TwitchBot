@@ -1,4 +1,11 @@
 require('dotenv').config();
+const channelEnv = process.env.CHANNEL;
+if (channelEnv) {
+  var channel = "vlad_261";
+} else {
+  var channel = "mistercop";
+}
+channel = channel.toString();
 const botInitInfo = {
   "username": process.env.BotUsername,
   "password": process.env.password,
@@ -6,7 +13,7 @@ const botInitInfo = {
   "OAUTHtoken": process.env.OAUTHtoken,
   "Client_Id": process.env.Client_Id,
   "password_Not_TMI_Token": process.env.password_Not_TMI_Token,
-  "channels": ["mistercop"]
+  "channels": [channel]
 }
 
 module.exports = botInitInfo;
