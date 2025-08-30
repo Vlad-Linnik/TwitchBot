@@ -1,4 +1,4 @@
-const ChatStats = require('./msgHandlerDependencies/chatStats.js');
+const ChatStats = require('../msgHandlerDependencies/chatStats');
 const fs = require('fs').promises; // Используем промис-версию fs
 
 async function loadSmiles() {
