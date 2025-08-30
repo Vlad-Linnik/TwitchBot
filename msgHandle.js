@@ -97,9 +97,9 @@ function directMsgCheck(client, channel, userState, message) {
 
 function execCommands(client, channel, userState, message) {
   const commandCheck = [
-    getStats,
-    muteDuel,
-    muteDuelAccept,
+    //getStats,
+    //muteDuel,
+    //muteDuelAccept,
     customMath,
     getDota2RandomItem,
     //block_song,
