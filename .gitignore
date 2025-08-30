@@ -1,0 +1,4 @@
+.env
+node_modules/
+old_things/
+.vscode/
