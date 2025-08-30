@@ -6,7 +6,7 @@ const botInitInfo = {
   "OAUTHtoken": process.env.OAUTHtoken,
   "Client_Id": process.env.Client_Id,
   "password_Not_TMI_Token": process.env.password_Not_TMI_Token,
-  "channels": ["mistercop", "floim_", "meowgumin","vlad_261"]
+  "channels": ["mistercop"]
 }
 
 module.exports = botInitInfo;
