@@ -3410,10 +3410,10 @@
   },
   "obsidikar": {
     "win": 4,
-    "los": 6,
+    "los": 7,
     "draw": 0,
     "ban_sent_t": 145760,
-    "ban_rec_t": 161031
+    "ban_rec_t": 238808
   },
   "sashavinni": {
     "win": 0,
@@ -4795,10 +4795,10 @@
     "ban_rec_t": 0
   },
   "arzanis": {
-    "win": 14,
+    "win": 15,
     "los": 16,
     "draw": 4,
-    "ban_sent_t": 8389476,
+    "ban_sent_t": 8467253,
     "ban_rec_t": 6655863
   },
   "boorik_blood": {
