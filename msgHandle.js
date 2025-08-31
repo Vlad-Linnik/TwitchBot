@@ -20,6 +20,7 @@ const {
 } = require("./msgHandlerDependencies/muteDuel.js");
 const { isTimerReady } = require("./msgHandlerDependencies/timer.js");
 const ChatStats = require('./msgHandlerDependencies/chatStats.js');
+const botInitInfo = require("./botInitInfo.js");
 
 
 
@@ -94,12 +95,20 @@ function directMsgCheck(client, channel, userState, message) {
   }
   return 0;
 }
+function get_version (client, channel, userState, message) {
+  if (isMod(userState) && message.toLocaleLowerCase().match(/!botversion/)){
+    client.say( channel, `@${userState["username"]} bot version ${botInitInfo["version"]}`)
+    return 1;
+  }
+  return 0;
+}
 
 function execCommands(client, channel, userState, message) {
   const commandCheck = [
     //getStats,
     //muteDuel,
     //muteDuelAccept,
+    get_version,
     customMath,
     getDota2RandomItem,
     //block_song,

@@ -13,7 +13,8 @@ const botInitInfo = {
   "OAUTHtoken": process.env.OAUTHtoken,
   "Client_Id": process.env.Client_Id,
   "password_Not_TMI_Token": process.env.password_Not_TMI_Token,
-  "channels": [channel]
+  "channels": [channel],
+  "version": "0.1.0"
 }
 
 module.exports = botInitInfo;
