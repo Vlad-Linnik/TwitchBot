@@ -25,13 +25,10 @@ var smiles_arr = [
   "peepoRIP",
 ];
 
-function isInsult(message) {
+function isInsult(client, channel, userState, message) {
   message = message.toLowerCase();
   var res = message.match(MyRegex.insultsRegex);
-  return Boolean(res);
-}
-function isInsult2(client, channel, userState, message) {
-  if (isInsult(message)) {
+  if (Boolean(res)) {
     // if bot not a moderator
     if (!client.isMod(channel, "#" + botInitInfo["username"])) {
       client.say(channel, `@${userState["username"]} XyliPizdish `);
@@ -54,16 +51,11 @@ function isInsult2(client, channel, userState, message) {
         Math.floor(Math.random() * 2038) + 1 + extraTime.get(channel);
       var timeout = Math.floor(1.015 ** random_x / random_x ** 2.66 + 100);
       timeout = Math.min(100_000, timeout);
-      Twitch_ban_API.timeout(
-        userState["user-id"],
-        timeout,
-        userState["room-id"],
-        "не понравился"
-      );
+      Twitch_ban_API.timeout(userState["user-id"], timeout, userState["room-id"], "не понравился");
     }
     return 1;
   }
   return 0;
 }
 
-exports.isInsult2 = isInsult2;
+exports.isInsult = isInsult;

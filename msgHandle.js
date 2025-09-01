@@ -1,6 +1,6 @@
 const Twitch_ban_API = require("./TwitchBanAPI.js");
 const { isSmile } = require("./msgHandlerDependencies/SmileHandler.js");
-const { isInsult2 } = require("./msgHandlerDependencies/isInsult.js");
+const { isInsult } = require("./msgHandlerDependencies/isInsult.js");
 const { isMod } = require("./msgHandlerDependencies/isMod.js");
 const {
   mcopDuelExecute,
@@ -68,7 +68,7 @@ function directMsgCheck(client, channel, userState, message) {
     if (message.match(/!muteduel/)) {
       return 0;
     }
-    const checks = [mcopDuelExecute, isInsult2, isSmile, question];
+    const checks = [mcopDuelExecute, isInsult, isSmile, question];
     for (const check of checks) {
       if (check(client, channel, userState, message)) {
         return 1;
