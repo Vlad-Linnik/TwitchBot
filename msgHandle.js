@@ -16,7 +16,8 @@ const { customMath } = require("./msgHandlerDependencies/myMath.js");
 const { isTimerReady } = require("./msgHandlerDependencies/timer.js");
 const ChatStats = require('./msgHandlerDependencies/chatStats.js');
 const botInitInfo = require("./botInitInfo.js");
-const {muteDuelAccept, muteDuel} = require("./msgHandlerDependencies/muteDuel.js");
+const {muteDuelAccept, muteDuel, timeChanger} = require("./msgHandlerDependencies/muteDuel.js");
+const {getDatabaseStatsSummary} = require("./msgHandlerDependencies/db.js");
 
 
 
@@ -90,9 +91,14 @@ function directMsgCheck(client, channel, userState, message) {
   }
   return 0;
 }
-function get_version (client, channel, userState, message) {
-  if (isMod(userState) && message.toLocaleLowerCase().match(/!botversion/)){
-    client.say( channel, `@${userState["username"]} bot version ${botInitInfo["version"]}`)
+async function get_bot_info (client, channel, userState, message) {
+  if (isMod(userState) && message.toLocaleLowerCase().match(/!botinfo/)){
+    var DBstats = await getDatabaseStatsSummary();
+    var timeD = new Date() - botInitInfo["startTime"];
+    var info = `@${userState["username"]} bot version ${botInitInfo["version"]}, `+
+     `works: ${timeChanger(timeD/1000)}, `+
+     DBstats;
+    client.say(channel, info);
     return 1;
   }
   return 0;
@@ -103,7 +109,7 @@ function execCommands(client, channel, userState, message) {
   const commandCheck = [
     muteDuel,
     muteDuelAccept,
-    get_version,
+    get_bot_info,
     customMath,
     getDota2RandomItem
   ];

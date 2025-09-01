@@ -197,5 +197,6 @@ function muteDuelAccept(client, channel, userState, message) {
 
 module.exports={
   muteDuel:muteDuel,
-  muteDuelAccept:muteDuelAccept
+  muteDuelAccept:muteDuelAccept,
+  timeChanger: timeChanger
 }
