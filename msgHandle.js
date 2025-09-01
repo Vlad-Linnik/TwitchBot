@@ -16,7 +16,7 @@ const { customMath } = require("./msgHandlerDependencies/myMath.js");
 const { isTimerReady } = require("./msgHandlerDependencies/timer.js");
 const ChatStats = require('./msgHandlerDependencies/chatStats.js');
 const botInitInfo = require("./botInitInfo.js");
-
+const {muteDuelAccept, muteDuel} = require("./msgHandlerDependencies/muteDuel.js");
 
 
 
@@ -98,19 +98,18 @@ function get_version (client, channel, userState, message) {
   return 0;
 }
 
-function muteDuel(client, channel, userState, message) {
-  if (message.toLocaleLowerCase().match(/^!muteduel/)) {
-    client.say(channel, `@${userState["username"]} !muteduel временно недоступно`);
-    return 1;
-  }
-  return 0;
-}
+// function muteDuel(client, channel, userState, message) {
+//   if (message.toLocaleLowerCase().match(/^!muteduel/)) {
+//     client.say(channel, `@${userState["username"]} !muteduel временно недоступно`);
+//     return 1;
+//   }
+//   return 0;
+// }
 
 function execCommands(client, channel, userState, message) {
   const commandCheck = [
-    //getStats,
     muteDuel,
-    //muteDuelAccept,
+    muteDuelAccept,
     get_version,
     customMath,
     getDota2RandomItem,

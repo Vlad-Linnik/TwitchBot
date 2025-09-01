@@ -1,5 +1,4 @@
 // Import required modules and dependencies
-const myJson = require("./MyJson");
 const { isTimerReady } = require("./timer.js");
 const { isMod } = require("./isMod.js");
 const TwitchBanAPI = require("../TwitchBanAPI.js");
@@ -15,8 +14,7 @@ const MUTE_DUEL_DELAY = 50_000; // 3 minutes
 const MAX_TIMEOUT = 1_209_600; // Maximum timeout value in seconds
 const MINIMUM_DUEL_TIMEOUT = 300; // Minimum timeout value in seconds
 
-// Initialize duel statistics and mute duel information for each channel
-const duelStatsData = new Map();
+// Initialize mute duel information for each channel
 const muteDuelInfo = new Map();
 
 function initializeMuteDuelInfo() {
@@ -35,11 +33,6 @@ function initializeMuteDuelInfo() {
 for (const channel of botInitInfo.channels) {
   const channelName = `#${channel}`;
 
-  // Initialize user statistics handler for the channel
-  duelStatsData.set(
-    channelName,
-    new myJson.UserStatsHandler(`./duelStats/${channel}.json`)
-  );
 
   // Initialize mute duel information for the channel
   muteDuelInfo.set(channelName, initializeMuteDuelInfo());
@@ -60,31 +53,6 @@ function timeChanger(timeSeconds) {
   return [timeSeconds.toFixed(2), timeUnits[4]];
 }
 
-// Function to fetch and display mute duel statistics
-function getStats(client, channel, userState, message) {
-  const match = message.toLowerCase().match(/!mutestats (@\w+)/);
-  if (match) {
-    if (!client.isMod(channel, `#${botInitInfo.username}`)) {
-      client.say(channel, `@${userState.username} eeeh`);
-      return 1;
-    }
-
-    const targetUser = match[1].slice(1).toLowerCase();
-    const result = duelStatsData.get(channel).getUserStats(targetUser);
-
-    if (result) {
-      const timeoutSent = timeChanger(result.ban_sent_t);
-      const timeoutReceived = timeChanger(result.ban_rec_t);
-      client.say(
-        channel,
-        `@${userState.username} Статистика ${targetUser} победы: ${result.win} поражения: ${result.los} ничья: ${result.draw}; отправил в таймаут на ${timeoutSent[0]} ${timeoutSent[1]}; получил таймаутов на ${timeoutReceived[0]} ${timeoutReceived[1]}`
-      );
-      return 1;
-    }
-  }
-  return 0;
-}
-
 // Function to handle mute duel challenges
 function muteDuel(client, channel, userState, message) {
   function duelDelayCheck(channel, userState) {
@@ -93,12 +61,7 @@ function muteDuel(client, channel, userState, message) {
       const remainingTime =
         (MUTE_DUEL_DELAY - (Date.now() - muteInfo.timeStart)) / 1000;
       const timePrefix = timeChanger(remainingTime);
-      client.say(
-        channel,
-        `@${userState.username} Я еще не готов, КД: ${Math.floor(
-          timePrefix[0]
-        )} ${timePrefix[1]}`
-      );
+      client.say(channel, `@${userState.username} Я еще не готов, КД: ${Math.floor(timePrefix[0])} ${timePrefix[1]}`);
       return 1;
     }
     return 0;
@@ -213,28 +176,6 @@ function muteDuelAccept(client, channel, userState, message) {
         }
       }
 
-      // Update duel statistics
-      if (winner) {
-        duelStatsData.get(channel).incrementStat(winner, "win");
-        duelStatsData
-          .get(channel)
-          .incrementBanStat(
-            winner,
-            "ban_sent_t",
-            muteDuelInfo.get(channel)["timeout"]
-          );
-        duelStatsData.get(channel).incrementStat(lostUser, "los");
-        duelStatsData
-          .get(channel)
-          .incrementBanStat(
-            lostUser,
-            "ban_rec_t",
-            muteDuelInfo.get(channel)["timeout"]
-          );
-      } else {
-        duelStatsData.get(channel).incrementStat(muteInfo["user1"], "draw");
-        duelStatsData.get(channel).incrementStat(muteInfo["user2"], "draw");
-      }
       // timeout lost user
       if (lostUser) {
         TwitchBanAPI.timeout(
@@ -251,4 +192,10 @@ function muteDuelAccept(client, channel, userState, message) {
     }
   }
   return 0;
+}
+
+
+module.exports={
+  muteDuel:muteDuel,
+  muteDuelAccept:muteDuelAccept
 }
