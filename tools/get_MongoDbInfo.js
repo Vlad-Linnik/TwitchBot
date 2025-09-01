@@ -1,48 +1,33 @@
-const { MongoClient } = require('mongodb');
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 B';
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + sizes[i];
+}
 
-async function getDatabaseStats(connectionString, dbName, collectionName) {
+async function getDatabaseStatsSummary(connectionString, dbName, collectionName) {
   const client = new MongoClient(connectionString);
-  
+
   try {
     await client.connect();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // 1. Общее количество записей
+    // Количество документов
     const totalRecords = await collection.countDocuments();
 
-    // 2. Дата самой первой записи (по полю `date` или `timestamp`)
-    const oldestRecord = await collection
-      .find({})
-      .sort({ date: 1 }) // или `timestamp: 1`
-      .limit(1)
-      .toArray();
-    const firstRecordDate = oldestRecord[0]?.date || null;
+    // Дата первой записи
+    const oldestRecord = await collection.find({}).sort({ date: 1 }).limit(1).toArray();
+    const firstRecordDate = oldestRecord[0]?.date?.toISOString().split('T')[0] || '—';
 
-    // 3. Объем занимаемой памяти (в МБ)
+    // Статистика
     const stats = await db.command({ dbStats: 1 });
-    const sizeInMB = (stats.dataSize / (1024 * 1024)).toFixed(2);
 
-    return {
-      totalRecords,
-      oldestRecord,
-      size: `${sizeInMB} MB`,
-      rawStats: stats // Полная статистика (опционально)
-    };
-  } catch (err) {
-    console.error('Error fetching database stats:', err);
-    throw err;
+    const used = stats.fsUsedSize;                  // использовано на диске
+    const free = stats.fsTotalSize - stats.fsUsedSize; // свободно на диске
+
+    return `Всего записей: ${totalRecords} • Первая запись: ${firstRecordDate} • Использовано: ${formatBytes(used)} / Свободно: ${formatBytes(free)}`;
   } finally {
     await client.close();
   }
 }
-
-// Пример использования
-(async () => {
-  const stats = await getDatabaseStats(
-    'mongodb://localhost:27017',
-    'twitch_chat_stats',
-    'messages'
-  );
-  console.log('Database Stats:', stats);
-})();
