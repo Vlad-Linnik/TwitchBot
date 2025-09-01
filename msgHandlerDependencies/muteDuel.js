@@ -252,5 +252,3 @@ function muteDuelAccept(client, channel, userState, message) {
   }
   return 0;
 }
-
-module.exports = { muteDuelAccept, muteDuel, getStats };
