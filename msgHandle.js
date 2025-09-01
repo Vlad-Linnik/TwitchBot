@@ -98,13 +98,6 @@ function get_version (client, channel, userState, message) {
   return 0;
 }
 
-// function muteDuel(client, channel, userState, message) {
-//   if (message.toLocaleLowerCase().match(/^!muteduel/)) {
-//     client.say(channel, `@${userState["username"]} !muteduel временно недоступно`);
-//     return 1;
-//   }
-//   return 0;
-// }
 
 function execCommands(client, channel, userState, message) {
   const commandCheck = [
@@ -112,8 +105,7 @@ function execCommands(client, channel, userState, message) {
     muteDuelAccept,
     get_version,
     customMath,
-    getDota2RandomItem,
-    //block_song,
+    getDota2RandomItem
   ];
   for (const cmd of commandCheck) {
     if (cmd(client, channel, userState, message)) {
