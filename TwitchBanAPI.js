@@ -49,20 +49,7 @@ async function ban(userId, broadcasterId, reason = "No reason") {
   }
 }
 
-const isMod = (userState) => {
-  if (userState["badges"]) {
-    if (
-      userState["badges"]["broadcaster"] ||
-      userState["badges"]["moderator"]
-    ) {
-      return true;
-    }
-    return false;
-  }
-};
-
 module.exports = {
   timeout: timeout,
-  isMod: isMod,
   ban: ban,
 };
