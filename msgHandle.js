@@ -18,7 +18,7 @@ const ChatStats = require('./msgHandlerDependencies/chatStats.js');
 const botInitInfo = require("./botInitInfo.js");
 const {muteDuelAccept, muteDuel, timeChanger} = require("./msgHandlerDependencies/muteDuel.js");
 const {getDatabaseStatsSummary} = require("./msgHandlerDependencies/db.js");
-
+const { spawn } = require('child_process');
 
 
 //timers
@@ -104,17 +104,37 @@ async function get_bot_info (client, channel, userState, message) {
   return 0;
 }
 
+function restartBot (client, channel, userState, message) {
+  if (!["vlad_261", "mistercop"].includes(userState.username)) return 0;
 
-function execCommands(client, channel, userState, message) {
+  if (isMod(userState) && message.toLocaleLowerCase().match(/!restartbot/)) {
+    client.say(channel, `@${userState["username"]} restarting...`);
+    var bat_file_name = 'start.bat';
+    if (channel.match(/vlad_261/)) {
+      bat_file_name = 'start_test.bat';
+    }
+    spawn('cmd.exe', ['/c', bat_file_name], {
+      detached: true,
+      stdio: 'ignore'
+    }).unref();
+    return 1;
+  }
+  return 0;
+}
+
+async function execCommands(client, channel, userState, message) {
   const commandCheck = [
     muteDuel,
     muteDuelAccept,
     get_bot_info,
     customMath,
-    getDota2RandomItem
+    getDota2RandomItem,
+    restartBot
+    
   ];
   for (const cmd of commandCheck) {
-    if (cmd(client, channel, userState, message)) {
+    if ( await cmd(client, channel, userState, message)) {
+      console.log(cmd.name)
       return 1;
     }
   }
@@ -171,6 +191,7 @@ async function topChatters(client, channel, userState, message) {
   }
   client.say(channel, answer);
 }
+
 
 async function topSmiles(client, channel, userState, message) {
   if (isTimerReady(lasttopSmiles, topSmilesTimer)){
