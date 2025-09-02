@@ -21,32 +21,9 @@ const client = new tmi.client(opts);
 client.on("chat", async (channel, userState, message, self) => {
   // Don't listen to my own messages..
   if (self) return;
-
-  
-  msgHandle.mcopGaGaGa(client, channel, userState, message);
   // log msg
   ChatStats.addMessage(userState["user-id"], userState["username"], message, channel);
-  // top users 
-  if (message.toLocaleLowerCase().match(/^!topchatters/)) {
-    msgHandle.topChatters(client, channel, userState, message);
-    return;}
-  // top users 
-  if (message.toLocaleLowerCase().match(/^!topsmiles/)) {
-    msgHandle.topSmiles(client, channel, userState, message);
-    return;}
-  // get count of words occurrences
-  if (message.toLocaleLowerCase().match(/^!countword/)) {
-    msgHandle.countWord(client, channel, userState, message);
-    return;}
-  // get count of user messages
-  if (message.toLocaleLowerCase().match(/^!countmsg/)) {
-    msgHandle.countUserMsg(client, channel, userState, message);
-  return;}
-  // add remove word to white list
-  if(message.toLocaleLowerCase().match(/^!addword|^!remword/)) {
-    msgHandle.addRemWordToWhiteList(client, channel, userState, message);
-    return;
-  }
+
 
 
   // direct msg to this bot

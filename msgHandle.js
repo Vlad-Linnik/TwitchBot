@@ -25,7 +25,7 @@ const { spawn } = require('child_process');
 const countWordTimer = 30 * 1000; // 30 sec
 var lastCountWord = 0;
 
-const mcopGaGaGaFRKTimer = 15 * 60 * 1000; // 15 minutes
+const mcopGaGaGaFRKTimer = 30 * 60 * 1000; // 30 minutes
 var lastMcopGaGaGaFRK = 0;
 
 const topUsersTimer = 30 * 1000; // 30 sec
@@ -47,17 +47,6 @@ var period_text_list = {"day": "сегодня", "week": "неделю", "month"
 Array.prototype.random = function () {
   return this[Math.floor(Math.random() * this.length)];
 };
-
-
-function mcopGaGaGa(client, channel, userState, message) {
-  if (
-    userState["username"].match(/meowgumin/) &&
-    isTimerReady(lastMcopGaGaGaFRK, mcopGaGaGaFRKTimer)
-  ) {
-    lastMcopGaGaGaFRK = new Date().getTime();
-    client.say(channel, `mcopGAGAGA @${userState["username"]} frk`);
-  }
-}
 
 function directMsgCheck(client, channel, userState, message) {
   // direct message to this bot
@@ -129,7 +118,12 @@ async function execCommands(client, channel, userState, message) {
     get_bot_info,
     customMath,
     getDota2RandomItem,
-    restartBot
+    restartBot,
+    topChatters,
+    topSmiles,
+    countWord,
+    countUserMsg,
+    addRemWordToWhiteList
     
   ];
   for (const cmd of commandCheck) {
@@ -163,9 +157,10 @@ async function spam_protection(client, channel, userState, message) {
 
 
 async function topChatters(client, channel, userState, message) {
+  if (!message.toLocaleLowerCase().match(/^!topchatters/)) return 0;
   if (isTimerReady(lastTopUsers, topUsersTimer)){
     lastTopUsers = new Date().getTime();
-  }else{return;}
+  }else{return 1;}
   let topSize = 6;
   let args = message.toLocaleLowerCase().match(/!topchatters (\w+)/);
   let period;
@@ -176,7 +171,7 @@ async function topChatters(client, channel, userState, message) {
       period = args[1];
     } else {
       client.say(channel, `@${userState["username"]} ожидалось !topchatters (day|week|month|all)  VoHiYo `);
-      return;
+      return 1;
     }
   }
   let TopUsers = await ChatStats.getTopUsers(topSize, channel, period);
@@ -190,13 +185,15 @@ async function topChatters(client, channel, userState, message) {
     answer += top_smiles[row] + " " + TopUsers[row]["userName"] + " (" + TopUsers[row]["count"] + ") |";
   }
   client.say(channel, answer);
+  return 1;
 }
 
 
 async function topSmiles(client, channel, userState, message) {
+  if (!message.toLocaleLowerCase().match(/^!topsmiles/)) return  0;
   if (isTimerReady(lasttopSmiles, topSmilesTimer)){
     lasttopSmiles = new Date().getTime();
-  }else{return;}
+  }else{return 1;}
   let args = message.toLocaleLowerCase().match(/!topsmiles (\w+)/);
   let topSize = 5;
   let period = "day";
@@ -207,7 +204,7 @@ async function topSmiles(client, channel, userState, message) {
       period = args[1];
     } else {
       client.say(channel, `@${userState["username"]} ожидалось !topsmiles (day|week|month|all)  VoHiYo `);
-      return;
+      return 1;
     }
   }
   var answer = `🏆 Топ смайлов за ${period_text_list[period]}: `;
@@ -216,20 +213,22 @@ async function topSmiles(client, channel, userState, message) {
     answer += TopSmilesList[index]["word"] + " - (" + TopSmilesList[index]["count"] + ") | ";
   }
   client.say(channel, answer);
+  return 1;
 }
 
 async function countWord(client, channel, userState, message) {
+  if (!message.toLocaleLowerCase().match(/^!countword/)) return 0;
   var period = false;
   if (isTimerReady(lastCountWord, countWordTimer)) {
     lastCountWord = new Date().getTime();
-  }else{return;}
+  }else{return 1;}
   // 2 args
   var res = message.toLocaleLowerCase().match(/!countword (\S+) (\w+)/);
   if (res) {
     period = res[2];
     if (!possible_periods.includes(period)){
       client.say(channel, `@${userState["username"]} Ожидалось: !countword СловоДляПоиска (day|week|month|all)  VoHiYo `);
-      return;
+      return 1;
     }
   }else{
     // 1 arg
@@ -237,7 +236,7 @@ async function countWord(client, channel, userState, message) {
     // error
     if (!res) {
       client.say(channel, `@${userState["username"]} Ожидалось: !countword СловоДляПоиска  VoHiYo `);
-    return;
+    return 1;
     }
     period = "day"
   }
@@ -249,48 +248,46 @@ async function countWord(client, channel, userState, message) {
   var keyWord = res[1];
   var wordInfo = await ChatStats.countWordOccurrences(keyWord, channel, period);
   client.say(channel, `@${userState["username"]} Найдено упоминаний: ${wordInfo} за ${text_period}`);
+  return 1;
 }
 
 async function countUserMsg(client, channel, userState, message) {
+  if (!message.toLocaleLowerCase().match(/^!countmsg/)) return 0;
   if(isTimerReady(lastCountUserMsg, countUserMsgTimer)) {
     lastCountUserMsg = new Date().getTime();
-  }else{return;}
+  }else{return 1;}
   var period = "day";
   var res = message.toLocaleLowerCase().match(/!countmsg (\w+)/);
   if (res) {
     if(!possible_periods.includes(res[1])){
       client.say(channel, `@${userState["username"]} Ожидалось: !countmsg (day|week|month|all)  VoHiYo `);
-      return;
+      return 1;
     }
     period = res[1];
   }
   var UserMsgCount = await ChatStats.getUserMessageCount(userState["user-id"], channel, period);
   client.say(channel, `У пользователя @${userState["username"]} ${UserMsgCount} сообщений за ${period_text_list[period]}`);
+  return 1;
 }
 
 async function addRemWordToWhiteList(client, channel, userState, message) {
-  if(!isMod(userState)) {return;}
+  if(!isMod(userState)) {return 0;}
   var cmdArgs = message.match(/!addword (\w+)|!remword (\w+)/);
   if (!cmdArgs) {
     client.say(channel, `@${userState["username"]} ошибка VoHiYo `);
-    return;
+    return 1;
   }
   if(message.toLocaleLowerCase().match(/!addword/)){
     await ChatStats.addToWhiteList(cmdArgs[1]);
     client.say(channel, `@${userState["username"]} слово "${cmdArgs[1]}" отслеживается ✅`);
-    return;
+    return 1;
   }
   await ChatStats.removeFromWhiteList(cmdArgs[2]);
   client.say(channel, `@${userState["username"]} слово "${cmdArgs[2]}" НЕ отслеживается ✅`);
+  return 1;
 }
 
 module.exports = {
-  addRemWordToWhiteList: addRemWordToWhiteList,
-  countUserMsg: countUserMsg,
-  countWord: countWord,
-  topSmiles: topSmiles,
-  topChatters: topChatters,
-  mcopGaGaGa: mcopGaGaGa,
   directMsgCheck: directMsgCheck,
   execCommands: execCommands,
   randomEventsAndThings: randomEventsAndThings,
