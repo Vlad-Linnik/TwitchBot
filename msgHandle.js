@@ -22,22 +22,19 @@ const { spawn } = require('child_process');
 
 
 //timers
-const countWordTimer = 30 * 1000; // 30 sec
+const countWordTimer = 15 * 1000; // 15 sec
 var lastCountWord = 0;
 
-const mcopGaGaGaFRKTimer = 30 * 60 * 1000; // 30 minutes
-var lastMcopGaGaGaFRK = 0;
-
-const topUsersTimer = 30 * 1000; // 30 sec
+const topUsersTimer = 15 * 1000; // 15 sec
 var lastTopUsers = 0;
 
-const topSmilesTimer = 30 * 1000; // 30 sec
+const topSmilesTimer = 15 * 1000; // 15 sec
 var lasttopSmiles = 0;
 
-const countUserMsgTimer = 30 * 1000; // 30 sec
+const countUserMsgTimer = 15 * 1000; // 15 sec
 var lastCountUserMsg = 0;
 
-const countUniqueTimer = 30 * 1000; // 30 sec
+const countUniqueTimer = 15 * 1000; // 15 sec
 var lastcountUnique = 0;
 
 // utilities

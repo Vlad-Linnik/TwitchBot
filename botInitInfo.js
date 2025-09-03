@@ -16,7 +16,7 @@ const botInitInfo = {
   "Client_Id": process.env.Client_Id,
   "password_Not_TMI_Token": process.env.password_Not_TMI_Token,
   "channels": [channel],
-  "version": "0.1.0c",
+  "version": "0.1.1",
   "startTime": startTime
 }
 
