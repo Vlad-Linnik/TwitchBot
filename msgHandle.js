@@ -75,7 +75,6 @@ function directMsgCheck(client, channel, userState, message) {
       "я сейчас занят, ем пиццу peepoPizza",
     ];
     client.say(channel, `@${userState["username"]} ${answer.random()}`);
-
     return 1;
   }
   return 0;
@@ -96,7 +95,7 @@ async function get_bot_info (client, channel, userState, message) {
 function restartBot (client, channel, userState, message) {
   if (!["vlad_261", "mistercop"].includes(userState.username)) return 0;
 
-  if (isMod(userState) && message.toLocaleLowerCase().match(/!restartbot/)) {
+  if (isMod(userState) && message.toLocaleLowerCase().match(/^!restartbot/)) {
     client.say(channel, `@${userState["username"]} restarting...`);
     var bat_file_name = 'start.bat';
     if (channel.match(/vlad_261/)) {
