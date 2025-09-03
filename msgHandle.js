@@ -271,6 +271,7 @@ async function countUserMsg(client, channel, userState, message) {
 }
 
 async function addRemWordToWhiteList(client, channel, userState, message) {
+  if (!message.match(/^!addword|^!remword/)) {return 0;}
   if(!isMod(userState)) {return 0;}
   var cmdArgs = message.match(/!addword (\w+)|!remword (\w+)/);
   if (!cmdArgs) {
