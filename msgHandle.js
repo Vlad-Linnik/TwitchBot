@@ -154,14 +154,17 @@ async function topChatters(client, channel, userState, message) {
   if (isTimerReady(lastTopUsers, topUsersTimer)){
     lastTopUsers = new Date().getTime();
   }else{return 1;}
-  let topSize = 6;
+  let topSize = 7;
+  let showTop =  5;
   let args = message.toLocaleLowerCase().match(/!topchatters (\w+)/);
   let period = check_2args_command(args);
   let TopUsers = await ChatStats.getTopUsers(topSize, channel, period);
   let top_smiles = ["👑","🥈","🥉","🍬","🍬"];
   let answer=`🏆 Топ чаттерсов за ${period_text_list[period]}`;
-  TopUsers = TopUsers.filter(item => item.userName !== 'moobot');
-  if (topSize == TopUsers.length) {
+  TopUsers = TopUsers.filter(item => 
+    item.userName !== 'moobot' && item.userName !== 'mistercopus_bot'
+);
+  while (TopUsers.length > showTop) {
     TopUsers.pop();
   }
   for (let row = 0; row < TopUsers.length; row++) {
@@ -205,7 +208,7 @@ async function countWord(client, channel, userState, message) {
     }
   }else{
     // 1 arg
-    var res = message.toLocaleLowerCase().match(/!countword (\W+)/);
+    var res = message.toLocaleLowerCase().match(/!countword (\S+)/);
     // error
     if (!res) {
       client.say(channel, `@${userState["username"]} Ожидалось: !countword СловоДляПоиска  VoHiYo `);
