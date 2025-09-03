@@ -156,17 +156,7 @@ async function topChatters(client, channel, userState, message) {
   }else{return 1;}
   let topSize = 6;
   let args = message.toLocaleLowerCase().match(/!topchatters (\w+)/);
-  let period;
-  if (!args) {
-    period = "day";
-  } else {
-    if (possible_periods.includes(args[1])) {
-      period = args[1];
-    } else {
-      client.say(channel, `@${userState["username"]} ожидалось !topchatters (day|week|month|all)  VoHiYo `);
-      return 1;
-    }
-  }
+  let period = check_2args_command(args);
   let TopUsers = await ChatStats.getTopUsers(topSize, channel, period);
   let top_smiles = ["👑","🥈","🥉","🍬","🍬"];
   let answer=`🏆 Топ чаттерсов за ${period_text_list[period]}`;
@@ -189,17 +179,7 @@ async function topSmiles(client, channel, userState, message) {
   }else{return 1;}
   let args = message.toLocaleLowerCase().match(/!topsmiles (\w+)/);
   let topSize = 5;
-  let period = "day";
-  if (!args) {
-    period = "day";
-  } else {
-    if (possible_periods.includes(args[1])) {
-      period = args[1];
-    } else {
-      client.say(channel, `@${userState["username"]} ожидалось !topsmiles (day|week|month|all)  VoHiYo `);
-      return 1;
-    }
-  }
+  let period = check_2args_command(args);
   var answer = `🏆 Топ смайлов за ${period_text_list[period]}: `;
   var TopSmilesList = await ChatStats.getTopWords(topSize, channel, period);
   for (let index = 0; index < TopSmilesList.length; index++) {
@@ -249,15 +229,8 @@ async function countUserMsg(client, channel, userState, message) {
   if(isTimerReady(lastCountUserMsg, countUserMsgTimer)) {
     lastCountUserMsg = new Date().getTime();
   }else{return 1;}
-  var period = "day";
-  var res = message.toLocaleLowerCase().match(/!countmsg (\w+)/);
-  if (res) {
-    if(!possible_periods.includes(res[1])){
-      client.say(channel, `@${userState["username"]} Ожидалось: !countmsg (day|week|month|all)  VoHiYo `);
-      return 1;
-    }
-    period = res[1];
-  }
+  var args = message.toLocaleLowerCase().match(/!countmsg (\w+)/);
+  var period = check_2args_command(args);
   var UserMsgCount = await ChatStats.getUserMessageCount(userState["user-id"], channel, period);
   client.say(channel, `У пользователя @${userState["username"]} ${UserMsgCount} сообщений за ${period_text_list[period]}`);
   return 1;
