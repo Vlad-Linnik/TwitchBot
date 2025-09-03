@@ -22,7 +22,8 @@ client.on("chat", async (channel, userState, message, self) => {
   // Don't listen to my own messages..
   if (self) return;
   // log msg
-  ChatStats.addMessage(userState["user-id"], userState["username"], message, channel);
+  if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase()))
+    ChatStats.addMessage(userState["user-id"], userState["username"], message, channel);
 
 
 
@@ -43,6 +44,7 @@ client.on("chat", async (channel, userState, message, self) => {
 
   //radom things
   msgHandle.randomEventsAndThings(client, channel, userState, message);
+
 });
 
 client.connect();
