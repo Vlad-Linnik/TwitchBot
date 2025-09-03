@@ -37,6 +37,8 @@ var lasttopSmiles = 0;
 const countUserMsgTimer = 30 * 1000; // 30 sec
 var lastCountUserMsg = 0;
 
+const countUniqueTimer = 30 * 1000; // 30 sec
+var lastcountUnique = 0;
 
 // utilities
 var possible_periods = ["day", "week", "month", "all"];
@@ -47,6 +49,14 @@ var period_text_list = {"day": "сегодня", "week": "неделю", "month"
 Array.prototype.random = function () {
   return this[Math.floor(Math.random() * this.length)];
 };
+
+function check_2args_command(args) {
+  if (!args)
+    return "day";
+  if (possible_periods.includes(args[1]))
+    return args[1];
+  return "day";
+}
 
 function directMsgCheck(client, channel, userState, message) {
   // direct message to this bot
@@ -110,31 +120,6 @@ function restartBot (client, channel, userState, message) {
   return 0;
 }
 
-async function execCommands(client, channel, userState, message) {
-  const commandCheck = [
-    muteDuel,
-    muteDuelAccept,
-    get_bot_info,
-    customMath,
-    getDota2RandomItem,
-    restartBot,
-    topChatters,
-    topSmiles,
-    countWord,
-    countUserMsg,
-    addRemWordToWhiteList
-    
-  ];
-  for (const cmd of commandCheck) {
-    if ( await cmd(client, channel, userState, message)) {
-      console.log(cmd.name)
-      return 1;
-    }
-  }
-
-  return 0;
-}
-
 async function spam_protection(client, channel, userState, message) {
   if (isMod(userState)) {
     return;
@@ -153,7 +138,16 @@ async function spam_protection(client, channel, userState, message) {
   }
 }
 
-
+async function count_unique(client, channel, userState, message) {
+  if (!message.toLocaleLowerCase().match(/^!countunique/)) {return 0;}
+  if (isTimerReady(lastcountUnique, countUniqueTimer)){
+    lastcountUnique = new Date().getTime();
+  }else{return 1;}
+  var args = message.toLocaleLowerCase().match(/!countunique (\w+)/);
+  var period = check_2args_command(args);
+  var res =  await ChatStats.getUniqueUsersCount(channel, period);
+  client.say(channel, `@${userState["username"]} уникальных пользователей: ${res} за ${period_text_list[period]}`);
+}
 
 async function topChatters(client, channel, userState, message) {
   if (!message.toLocaleLowerCase().match(/^!topchatters/)) return 0;
@@ -287,6 +281,29 @@ async function addRemWordToWhiteList(client, channel, userState, message) {
   return 1;
 }
 
+async function execCommands(client, channel, userState, message) {
+  const commandCheck = [
+    muteDuel,
+    muteDuelAccept,
+    get_bot_info,
+    customMath,
+    getDota2RandomItem,
+    restartBot,
+    topChatters,
+    topSmiles,
+    countWord,
+    countUserMsg,
+    addRemWordToWhiteList,
+    count_unique
+  ];
+  for (const cmd of commandCheck) {
+    if ( await cmd(client, channel, userState, message)) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
 module.exports = {
   directMsgCheck: directMsgCheck,
   execCommands: execCommands,

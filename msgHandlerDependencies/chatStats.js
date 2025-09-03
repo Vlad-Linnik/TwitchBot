@@ -204,6 +204,42 @@ async getTopUsers(limit, channel, period) {
     count: item.count
   }));
 }
+//Получение количества уникальных пользователей
+async getUniqueUsersCount(channel, period) {
+  await this.ensureInitialized();
+  
+  const startDate = this.selectPeriod(period);
+  const endDate = new Date();
+  endDate.setHours(23, 59, 59, 999);
+  
+  const pipeline = [
+    {
+      $match: {
+        channel: channel,
+        timestamp: {
+          $gte: startDate,
+          $lte: endDate
+        }
+      }
+    },
+    {
+      $group: {
+        _id: "$userId"
+      }
+    },
+    {
+      $count: "uniqueUsersCount"
+    }
+  ];
+  
+  try {
+    const result = await this.messagesCollection.aggregate(pipeline).toArray();
+    return result.length > 0 ? result[0].uniqueUsersCount : 0;
+  } catch (err) {
+    console.error('Ошибка при получении уникальных пользователей:', err);
+    return 0;
+  }
+}
 
 }
 
