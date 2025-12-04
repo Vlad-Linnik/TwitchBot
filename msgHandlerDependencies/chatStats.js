@@ -6,6 +6,7 @@ class ChatStats {
     this.messagesCollection = null;
     this.whiteListCollection = null;
     this.wordsCollection = null;
+    this.customCommandsCollection = null;
   }
 
   async initialize() {
@@ -14,6 +15,7 @@ class ChatStats {
       this.messagesCollection = db.collection('messages');
       this.wordsCollection = db.collection('words');
       this.whiteListCollection = db.collection('whiteList');
+      this.customCommandsCollection = db.collection("custom_commands");
       this.dbInitialized = true;
       console.log('DB collections initialized');
     } catch (err) {
@@ -27,50 +29,88 @@ class ChatStats {
     }
   }
 
-selectPeriod(period) {
-  let startDate = new Date();
-  switch (period) {
-    case 'day':
-      break;
-    case 'week':
-      startDate.setDate(startDate.getDate() - 7);
-      break;
-    case 'month':
-      startDate.setMonth(startDate.getMonth() - 1);
-      break;
-    case 'all':
-      startDate = new Date(0);
-      break;
-    default:
-      break;
+  async isCommandExist(command) {
+    await this.ensureInitialized();
+    return !! await this.customCommandsCollection.findOne( {command} );
   }
-  startDate.setHours(0,0,0,0);
-  return startDate;
-}
 
-async countWordOccurrences(word, channel, period) {
-  await this.ensureInitialized();
-  
-  // Create date range based on period
-  let startDate = this.selectPeriod(period);
-  const endDate = new Date();
-  // Create regex to match the whole word (case insensitive)
-  const escapedWord = word.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-  const wordRegex = new RegExp(`(^|[^\\p{L}])${escapedWord}([^\\p{L}]|$)`, 'iu');
-  // Build query
-  const query = {
-    channel,
-    message: wordRegex
-  };
-  
-  if (startDate) {
-    query.timestamp = { $gte: startDate, $lte: endDate };
+  async getAllCommands() {
+    await this.ensureInitialized();
+    var CommandsDict = {}
+    var Info = await this.customCommandsCollection.find().toArray();
+
+    for (const command of Info) {
+        CommandsDict[command["command"]] = {result: command["result"], timer: command["timer"]};
+    }
+    return CommandsDict;
+  }
+
+  async addNewCustomCommand(command, result, timer = null) {
+    await this.ensureInitialized();
+    this.customCommandsCollection.insertOne({command, result, timer});
+  } 
+
+  async deleteCustomCommand(command) {
+    await this.ensureInitialized();
+    this.customCommandsCollection.deleteOne({command});
   }
   
-  // Count matching messages
-  const count = await this.messagesCollection.countDocuments(query);
-  return count;
-}
+  async editCustomCommand(command, new_result, new_timer = null) {
+    await this.ensureInitialized();
+    this.customCommandsCollection.updateOne({command}, 
+    {
+      $set: 
+      {
+        result: new_result,
+        timer: new_timer
+      }
+    })
+  }
+  
+  selectPeriod(period) {
+    let startDate = new Date();
+    switch (period) {
+      case 'day':
+        break;
+      case 'week':
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case 'month':
+        startDate.setMonth(startDate.getMonth() - 1);
+        break;
+      case 'all':
+        startDate = new Date(0);
+        break;
+      default:
+        break;
+    }
+    startDate.setHours(0,0,0,0);
+    return startDate;
+  }
+
+  async countWordOccurrences(word, channel, period) {
+    await this.ensureInitialized();
+    
+    // Create date range based on period
+    let startDate = this.selectPeriod(period);
+    const endDate = new Date();
+    // Create regex to match the whole word (case insensitive)
+    const escapedWord = word.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const wordRegex = new RegExp(`(^|[^\\p{L}])${escapedWord}([^\\p{L}]|$)`, 'iu');
+    // Build query
+    const query = {
+      channel,
+      message: wordRegex
+    };
+    
+    if (startDate) {
+      query.timestamp = { $gte: startDate, $lte: endDate };
+    }
+    
+    // Count matching messages
+    const count = await this.messagesCollection.countDocuments(query);
+    return count;
+  }
 
   async addToWhiteList(word) {
     await this.ensureInitialized();
@@ -92,17 +132,17 @@ async countWordOccurrences(word, channel, period) {
     return !!found;
   }
 
-async addMessage(userId, userName, message, channel) {
-  await this.ensureInitialized();
-  
-  const timestamp = new Date();
-  this.messagesCollection.insertOne({
-    userId,
-    userName,
-    message,
-    channel,
-    timestamp
-  });
+  async addMessage(userId, userName, message, channel) {
+    await this.ensureInitialized();
+    
+    const timestamp = new Date();
+    this.messagesCollection.insertOne({
+      userId,
+      userName,
+      message,
+      channel,
+      timestamp
+    });
 
   // Новый подход к извлечению "слов"
   const wordPatterns = [
@@ -132,21 +172,80 @@ async addMessage(userId, userName, message, channel) {
       { word, channel, date: today },
       { $inc: { count: 1 } },
       { upsert: true }
-    );
+      );
+    }
   }
-}
-// получить количество сообщений от пользователя за период
-  async getUserMessageCount(userId, channel, period) {
-    await this.ensureInitialized();
-    let startDate = this.selectPeriod(period);
-    let endDate = new Date();
-    const count = await this.messagesCollection.countDocuments({
+
+async getUserRank(userId, channel, period) {
+  await this.ensureInitialized();
+
+  const startDate = this.selectPeriod(period);
+  const endDate = new Date();
+
+  // 1) получить количество сообщений пользователя за период
+  const userAgg = await this.messagesCollection.aggregate([
+    { $match: { channel, userId, timestamp: { $gte: startDate, $lte: endDate } } },
+    { $group: { _id: "$userId", totalMessages: { $sum: 1 } } }
+  ]).toArray();
+
+  const userTotal = (userAgg[0] && userAgg[0].totalMessages) || 0;
+
+  if (userTotal === 0) {
+    // если у пользователя нет сообщений в периоде — можно вернуть сразу
+    // но всё равно посчитаем общее количество пользователей для полной информации
+    const totalUsers = await this.getUniqueUsersCount(channel, period);
+
+    return {
       userId,
-      channel,
-      timestamp: { $gte: startDate, $lte: endDate }
-    });
-    return count;
+      totalMessages: 0,
+      rank: null,
+      percentage: null,
+      totalUsers: totalUsers[0] ? totalUsers[0].cnt : 0
+    };
   }
+
+  // 2) посчитать, сколько пользователей имеют totalMessages > userTotal
+  // для этого сначала агрегируем кол-во сообщений у всех пользователей, затем фильтруем по > userTotal
+  const greaterAgg = await this.messagesCollection.aggregate([
+    { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
+    {
+      $group: {
+        _id: "$userId",
+        totalMessages: { $sum: 1 }
+      }
+    },
+    { $match: { totalMessages: { $gt: userTotal } } },
+    { $count: "countGreater" }
+  ]).toArray();
+
+  const countGreater = (greaterAgg[0] && greaterAgg[0].countGreater) || 0;
+
+  // ранг = количество пользователей с большим count + 1
+  const rank = countGreater + 1;
+
+  // 3) получить общее число пользователей в периоде
+  const totalUsersAgg = await this.messagesCollection.aggregate([
+    { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
+    { $group: { _id: "$userId" } },
+    { $count: "cnt" }
+  ]).toArray();
+
+  const totalUsers = (totalUsersAgg[0] && totalUsersAgg[0].cnt) || 0;
+
+  var percentage = totalUsers > 0 ? Number(((rank / totalUsers) * 100)) : null;
+  if (percentage >= 0.1) {
+    percentage = percentage.toFixed(2);
+  } else {
+    percentage = percentage.toFixed(4);
+  }
+  return {
+    userId,
+    totalMessages: userTotal,
+    rank,
+    percentage,
+    totalUsers
+  };
+}
 
   async getTopWords(limit, channel, period) {
     await this.ensureInitialized();
@@ -171,75 +270,75 @@ async addMessage(userId, userName, message, channel) {
 
 
   //метод для получения топ пользователей
-async getTopUsers(limit, channel, period) {
-  await this.ensureInitialized();
-  
-  const startDate = this.selectPeriod(period);
-  const endDate = new Date();
-  endDate.setHours(23,59,59,999);
-  const result = await this.messagesCollection.aggregate([
-    { 
-      $match: {
-        channel: channel,
-        timestamp: { 
-          $gte: startDate,
-          $lte: endDate
+  async getTopUsers(limit, channel, period) {
+    await this.ensureInitialized();
+    
+    const startDate = this.selectPeriod(period);
+    const endDate = new Date();
+    endDate.setHours(23,59,59,999);
+    const result = await this.messagesCollection.aggregate([
+      { 
+        $match: {
+          channel: channel,
+          timestamp: { 
+            $gte: startDate,
+            $lte: endDate
+          }
         }
-      }
-    },
-    { 
-      $group: {
-        _id: "$userId",
-        userName: { $first: "$userName" },
-        count: { $sum: 1 }
-      }
-    },
-    { $sort: { count: -1 } },
-    { $limit: limit }
-  ]).toArray();
+      },
+      { 
+        $group: {
+          _id: "$userId",
+          userName: { $first: "$userName" },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } },
+      { $limit: limit }
+    ]).toArray();
 
-  return result.map(item => ({
-    userId: item._id,
-    userName: item.userName,
-    count: item.count
-  }));
-}
-//Получение количества уникальных пользователей
-async getUniqueUsersCount(channel, period) {
-  await this.ensureInitialized();
-  
-  const startDate = this.selectPeriod(period);
-  const endDate = new Date();
-  endDate.setHours(23, 59, 59, 999);
-  
-  const pipeline = [
-    {
-      $match: {
-        channel: channel,
-        timestamp: {
-          $gte: startDate,
-          $lte: endDate
-        }
-      }
-    },
-    {
-      $group: {
-        _id: "$userId"
-      }
-    },
-    {
-      $count: "uniqueUsersCount"
-    }
-  ];
-  
-  try {
-    const result = await this.messagesCollection.aggregate(pipeline).toArray();
-    return result.length > 0 ? result[0].uniqueUsersCount : 0;
-  } catch (err) {
-    console.error('Ошибка при получении уникальных пользователей:', err);
-    return 0;
+    return result.map(item => ({
+      userId: item._id,
+      userName: item.userName,
+      count: item.count
+    }));
   }
-}
+//Получение количества уникальных пользователей
+  async getUniqueUsersCount(channel, period) {
+    await this.ensureInitialized();
+    
+    const startDate = this.selectPeriod(period);
+    const endDate = new Date();
+    endDate.setHours(23, 59, 59, 999);
+    
+    const pipeline = [
+      {
+        $match: {
+          channel: channel,
+          timestamp: {
+            $gte: startDate,
+            $lte: endDate
+          }
+        }
+      },
+      {
+        $group: {
+          _id: "$userId"
+        }
+      },
+      {
+        $count: "uniqueUsersCount"
+      }
+    ];
+    
+    try {
+      const result = await this.messagesCollection.aggregate(pipeline).toArray();
+      return result.length > 0 ? result[0].uniqueUsersCount : 0;
+    } catch (err) {
+      console.error('Ошибка при получении уникальных пользователей:', err);
+      return 0;
+    }
+  }
 
 }
 

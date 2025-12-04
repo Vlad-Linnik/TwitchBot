@@ -16,7 +16,6 @@ const opts = {
 };
 // create bot instance
 const client = new tmi.client(opts);
-
 // main
 client.on("chat", async (channel, userState, message, self) => {
   // Don't listen to my own messages..
@@ -24,8 +23,6 @@ client.on("chat", async (channel, userState, message, self) => {
   // log msg
   if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase()))
     ChatStats.addMessage(userState["user-id"], userState["username"], message, channel);
-
-
 
   // direct msg to this bot
   if (message.match(/chatwizardbot/)) {
@@ -39,8 +36,6 @@ client.on("chat", async (channel, userState, message, self) => {
       return;
     }
   }
-  // spam protection
-  msgHandle.spam_protection(client, channel, userState, message);
 
   //radom things
   msgHandle.randomEventsAndThings(client, channel, userState, message);
