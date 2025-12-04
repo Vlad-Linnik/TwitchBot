@@ -37,9 +37,16 @@ var lastCountUserMsg = 0;
 const countUniqueTimer = 15 * 1000; // 15 sec
 var lastcountUnique = 0;
 
+const customCommandsTimer = 15 * 1000; // 15 sec
+var lastCustomCommand = 0;
+
 // utilities
 var possible_periods = ["day", "week", "month", "all"];
 var period_text_list = {"day": "сегодня", "week": "неделю", "month": "месяц", "all": "все время"};
+
+// custom commands
+var custom_commands = {};
+var CommandsKeysList = [];
 
 
 // overload array random function
@@ -115,24 +122,6 @@ function restartBot (client, channel, userState, message) {
     return 1;
   }
   return 0;
-}
-
-async function spam_protection(client, channel, userState, message) {
-  if (isMod(userState)) {
-    return;
-  }
-  if (userState["first-msg"] && message.match(/^-_-/)) {
-    Twitch_ban_API.ban(userState["user-id"], userState["room-id"], "spam bot");
-    return;
-  }
-  if (message.match(/^-_-/)) {
-    Twitch_ban_API.timeout(
-      userState["user-id"],
-      1200,
-      userState["room-id"],
-      "spam bot"
-    );
-  }
 }
 
 async function count_unique(client, channel, userState, message) {
@@ -231,8 +220,8 @@ async function countUserMsg(client, channel, userState, message) {
   }else{return 1;}
   var args = message.toLocaleLowerCase().match(/!countmsg (\w+)/);
   var period = check_2args_command(args);
-  var UserMsgCount = await ChatStats.getUserMessageCount(userState["user-id"], channel, period);
-  client.say(channel, `У пользователя @${userState["username"]} ${UserMsgCount} сообщений за ${period_text_list[period]}`);
+  var UserMsgCountInfo = await ChatStats.getUserRank(userState["user-id"], channel, period);
+  client.say(channel, `У пользователя @${userState["username"]} ${UserMsgCountInfo["totalMessages"]} сообщений, rank: ${UserMsgCountInfo["rank"]}, Top: ${UserMsgCountInfo["percentage"]}% за ${period_text_list[period]}`);
   return 1;
 }
 
@@ -254,32 +243,88 @@ async function addRemWordToWhiteList(client, channel, userState, message) {
   return 1;
 }
 
+async function updateCustomCommands() {
+  CommandsDict = await ChatStats.getAllCommands();
+  CommandsKeysList = Object.keys(CommandsDict).sort((a,b) => b.length - a.length);
+}
+
+async function exex_custom_command(client, channel, userState, message) {
+  updateCustomCommands();
+  for (const cmd of CommandsKeysList) {
+    if (message.startsWith(`!${cmd}`)) {
+      if (!isTimerReady(lastCustomCommand, customCommandsTimer)) return 1;
+      client.say(channel, CommandsDict[cmd]["result"]);
+      lastCustomCommand = new Date().getTime();
+      return 1;
+    }
+  }
+  return 0;
+}
+
+async function addCommand(client, channel, userState, message) {
+  if (!isMod(userState)) {return 0;}
+  var res = message.toLocaleLowerCase().match(/!addcommand !([a-z-0-9]+) (.+)/);
+  if (!res) return 0;
+  var newCommand = res[1];
+  var CommandResult = res[2];
+  if (! await ChatStats.isCommandExist(newCommand)){
+    ChatStats.addNewCustomCommand(newCommand, CommandResult);
+    client.say(channel, `@${userState["username"]} Команда успешно добавлена ✅`);
+    updateCustomCommands();
+    return 1;
+  }
+  console.log(newCommand, CommandResult);
+  ChatStats.editCustomCommand(newCommand, CommandResult, null);
+  client.say(channel, `@${userState["username"]} Команда успешно обновленна ✅`);
+  updateCustomCommands();
+  return 1;
+}
+
+async function deleteCustomCommand(client, channel, userState, message) {
+  if (!isMod(userState)) {return 0;}
+  var res = message.toLocaleLowerCase().match(/!delcommand !([a-z-0-9]+)/);
+  if (!res) return 0;
+  if (!ChatStats.isCommandExist(res[1])) return 1;
+  ChatStats.deleteCustomCommand(res[1]);
+  client.say(channel, `@${userState["username"]} Команда удалена! ❌`);
+  updateCustomCommands();
+  return 1;
+}
+
+async function getAllCustomCommands(client, channel, userState, message) {
+  if (message.toLocaleLowerCase().match(/!commands/)) {
+    await updateCustomCommands();
+    client.say(channel, `custom commands: ${CommandsKeysList}`);
+    return 1;
+  }
+  return 0;
+}
+
 async function execCommands(client, channel, userState, message) {
   const commandCheck = [
     muteDuel,
     muteDuelAccept,
-    get_bot_info,
     customMath,
     getDota2RandomItem,
-    restartBot,
-    topChatters,
-    topSmiles,
-    countWord,
-    countUserMsg,
-    addRemWordToWhiteList,
-    count_unique
+    restartBot
   ];
-  for (const cmd of commandCheck) {
+  const asyncCommandsCheck = [
+    getAllCustomCommands, deleteCustomCommand, addCommand, get_bot_info, topChatters,topSmiles,countWord,countUserMsg,addRemWordToWhiteList,count_unique, exex_custom_command
+  ]
+  for (const cmd of asyncCommandsCheck) {
     if ( await cmd(client, channel, userState, message)) {
       return 1;
     }
   }
-
+  for (const cmd of commandCheck) {
+    if (cmd(client, channel, userState, message)) {
+      return 1;
+    }
+  }
   return 0;
 }
 module.exports = {
   directMsgCheck: directMsgCheck,
   execCommands: execCommands,
-  randomEventsAndThings: randomEventsAndThings,
-  spam_protection: spam_protection,
+  randomEventsAndThings: randomEventsAndThings
 };

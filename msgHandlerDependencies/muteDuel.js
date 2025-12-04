@@ -55,7 +55,7 @@ function timeChanger(timeSeconds) {
 
 // Function to handle mute duel challenges
 function muteDuel(client, channel, userState, message) {
-  function duelDelayCheck(channel, userState) {
+  function duelDelayCheck(channel, userState) { 
     const muteInfo = muteDuelInfo.get(channel);
     if (!isTimerReady(muteInfo.timeStart, MUTE_DUEL_DELAY)) {
       const remainingTime =
