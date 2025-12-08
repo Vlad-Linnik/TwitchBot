@@ -263,7 +263,7 @@ async function exex_custom_command(client, channel, userState, message) {
 
 async function addCommand(client, channel, userState, message) {
   if (!isMod(userState)) {return 0;}
-  var res = message.toLocaleLowerCase().match(/!addcommand !([a-z-0-9]+) (.+)/);
+  var res = message.match(/!addcommand !([a-z-0-9]+) (.+)/);
   if (!res) return 0;
   var newCommand = res[1];
   var CommandResult = res[2];
