@@ -1,4 +1,3 @@
-const Twitch_ban_API = require("./TwitchBanAPI.js");
 const { isSmile } = require("./msgHandlerDependencies/SmileHandler.js");
 const { isInsult } = require("./msgHandlerDependencies/isInsult.js");
 const { isMod } = require("./msgHandlerDependencies/isMod.js");
@@ -19,7 +18,7 @@ const botInitInfo = require("./botInitInfo.js");
 const {muteDuelAccept, muteDuel, timeChanger} = require("./msgHandlerDependencies/muteDuel.js");
 const {getDatabaseStatsSummary} = require("./msgHandlerDependencies/db.js");
 const { spawn } = require('child_process');
-
+const CustomCommands = require("./msgHandlerDependencies/CustomCommands.js");
 
 //timers
 const countWordTimer = 15 * 1000; // 15 sec
@@ -37,16 +36,9 @@ var lastCountUserMsg = 0;
 const countUniqueTimer = 15 * 1000; // 15 sec
 var lastcountUnique = 0;
 
-const customCommandsTimer = 15 * 1000; // 15 sec
-var lastCustomCommand = 0;
-
 // utilities
 var possible_periods = ["day", "week", "month", "all"];
 var period_text_list = {"day": "сегодня", "week": "неделю", "month": "месяц", "all": "все время"};
-
-// custom commands
-var custom_commands = {};
-var CommandsKeysList = [];
 
 
 // overload array random function
@@ -243,62 +235,6 @@ async function addRemWordToWhiteList(client, channel, userState, message) {
   return 1;
 }
 
-async function updateCustomCommands() {
-  CommandsDict = await ChatStats.getAllCommands();
-  CommandsKeysList = Object.keys(CommandsDict).sort((a,b) => b.length - a.length);
-}
-
-async function exex_custom_command(client, channel, userState, message) {
-  updateCustomCommands();
-  for (const cmd of CommandsKeysList) {
-    if (message.startsWith(`!${cmd}`)) {
-      if (!isTimerReady(lastCustomCommand, customCommandsTimer)) return 1;
-      client.say(channel, CommandsDict[cmd]["result"]);
-      lastCustomCommand = new Date().getTime();
-      return 1;
-    }
-  }
-  return 0;
-}
-
-async function addCommand(client, channel, userState, message) {
-  if (!isMod(userState)) {return 0;}
-  var res = message.match(/!addcommand !([a-z-0-9]+) (.+)/);
-  if (!res) return 0;
-  var newCommand = res[1];
-  var CommandResult = res[2];
-  if (! await ChatStats.isCommandExist(newCommand)){
-    ChatStats.addNewCustomCommand(newCommand, CommandResult);
-    client.say(channel, `@${userState["username"]} Команда успешно добавлена ✅`);
-    updateCustomCommands();
-    return 1;
-  }
-  console.log(newCommand, CommandResult);
-  ChatStats.editCustomCommand(newCommand, CommandResult, null);
-  client.say(channel, `@${userState["username"]} Команда успешно обновленна ✅`);
-  updateCustomCommands();
-  return 1;
-}
-
-async function deleteCustomCommand(client, channel, userState, message) {
-  if (!isMod(userState)) {return 0;}
-  var res = message.toLocaleLowerCase().match(/!delcommand !([a-z-0-9]+)/);
-  if (!res) return 0;
-  if (!ChatStats.isCommandExist(res[1])) return 1;
-  ChatStats.deleteCustomCommand(res[1]);
-  client.say(channel, `@${userState["username"]} Команда удалена! ❌`);
-  updateCustomCommands();
-  return 1;
-}
-
-async function getAllCustomCommands(client, channel, userState, message) {
-  if (message.toLocaleLowerCase().match(/!commands/)) {
-    await updateCustomCommands();
-    client.say(channel, `custom commands: ${CommandsKeysList}`);
-    return 1;
-  }
-  return 0;
-}
 
 async function execCommands(client, channel, userState, message) {
   const commandCheck = [
@@ -309,7 +245,11 @@ async function execCommands(client, channel, userState, message) {
     restartBot
   ];
   const asyncCommandsCheck = [
-    getAllCustomCommands, deleteCustomCommand, addCommand, get_bot_info, topChatters,topSmiles,countWord,countUserMsg,addRemWordToWhiteList,count_unique, exex_custom_command
+    CustomCommands.getAllCustomCommands,
+    get_bot_info, topChatters,topSmiles,countWord,countUserMsg,addRemWordToWhiteList,count_unique, 
+    CustomCommands.addCommand,
+    CustomCommands.deleteCustomCommand,
+    CustomCommands.exex_custom_command
   ]
   for (const cmd of asyncCommandsCheck) {
     if ( await cmd(client, channel, userState, message)) {
