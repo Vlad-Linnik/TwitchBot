@@ -90,7 +90,7 @@ class CustomCommands {
 
   getAllCustomCommands = async (client, channel, userState, message) =>
   {
-    if (message.toLocaleLowerCase().match(/!commands/)) {
+    if (message.toLocaleLowerCase().match(/!customcommands/)) {
       await this.updateCustomCommands();
       client.say(channel, `custom commands: [${this.CommandsKeysList[channel]}]`);
       return 1;
