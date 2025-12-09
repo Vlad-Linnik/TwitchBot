@@ -78,7 +78,7 @@ class CustomCommands {
   exex_custom_command = async(client, channel, userState, message) =>
   { 
     for (const cmd of this.CommandsKeysList[channel]) {
-      if (message.startsWith(`!${cmd}`)) {
+      if (message.toLocaleLowerCase().startsWith(`!${cmd}`)) {
         if (!isTimerReady(this.lastCustomCommand, this.customCommandsTimer)) return 1;
         client.say(channel, this.CommandsDict[channel][cmd]["result"]);
         this.lastCustomCommand = new Date().getTime();
