@@ -34,30 +34,29 @@ class ChatStats {
     return !! await this.customCommandsCollection.findOne( {command} );
   }
 
-  async getAllCommands() {
+  async getAllCommands(channel) {
     await this.ensureInitialized();
     var CommandsDict = {}
-    var Info = await this.customCommandsCollection.find().toArray();
-
+    var Info = await this.customCommandsCollection.find({channel: channel}).toArray();
     for (const command of Info) {
         CommandsDict[command["command"]] = {result: command["result"], timer: command["timer"]};
     }
     return CommandsDict;
   }
 
-  async addNewCustomCommand(command, result, timer = null) {
+  async addNewCustomCommand(channel, command, result, timer = null) {
     await this.ensureInitialized();
-    this.customCommandsCollection.insertOne({command, result, timer});
+    this.customCommandsCollection.insertOne({channel, command, result, timer});
   } 
 
-  async deleteCustomCommand(command) {
+  async deleteCustomCommand(channel, command) {
     await this.ensureInitialized();
-    this.customCommandsCollection.deleteOne({command});
+    this.customCommandsCollection.deleteOne({channel:channel,command:command});
   }
   
-  async editCustomCommand(command, new_result, new_timer = null) {
+  async editCustomCommand(channel, command, new_result, new_timer = null) {
     await this.ensureInitialized();
-    this.customCommandsCollection.updateOne({command}, 
+    this.customCommandsCollection.updateOne({channel:channel, command:command}, 
     {
       $set: 
       {
@@ -176,76 +175,76 @@ class ChatStats {
     }
   }
 
-async getUserRank(userId, channel, period) {
-  await this.ensureInitialized();
+  async getUserRank(userId, channel, period) {
+    await this.ensureInitialized();
 
-  const startDate = this.selectPeriod(period);
-  const endDate = new Date();
+    const startDate = this.selectPeriod(period);
+    const endDate = new Date();
 
-  // 1) получить количество сообщений пользователя за период
-  const userAgg = await this.messagesCollection.aggregate([
-    { $match: { channel, userId, timestamp: { $gte: startDate, $lte: endDate } } },
-    { $group: { _id: "$userId", totalMessages: { $sum: 1 } } }
-  ]).toArray();
+    // 1) получить количество сообщений пользователя за период
+    const userAgg = await this.messagesCollection.aggregate([
+      { $match: { channel, userId, timestamp: { $gte: startDate, $lte: endDate } } },
+      { $group: { _id: "$userId", totalMessages: { $sum: 1 } } }
+    ]).toArray();
 
-  const userTotal = (userAgg[0] && userAgg[0].totalMessages) || 0;
+    const userTotal = (userAgg[0] && userAgg[0].totalMessages) || 0;
 
-  if (userTotal === 0) {
-    // если у пользователя нет сообщений в периоде — можно вернуть сразу
-    // но всё равно посчитаем общее количество пользователей для полной информации
-    const totalUsers = await this.getUniqueUsersCount(channel, period);
+    if (userTotal === 0) {
+      // если у пользователя нет сообщений в периоде — можно вернуть сразу
+      // но всё равно посчитаем общее количество пользователей для полной информации
+      const totalUsers = await this.getUniqueUsersCount(channel, period);
 
+      return {
+        userId,
+        totalMessages: 0,
+        rank: null,
+        percentage: null,
+        totalUsers: totalUsers[0] ? totalUsers[0].cnt : 0
+      };
+    }
+
+    // 2) посчитать, сколько пользователей имеют totalMessages > userTotal
+    // для этого сначала агрегируем кол-во сообщений у всех пользователей, затем фильтруем по > userTotal
+    const greaterAgg = await this.messagesCollection.aggregate([
+      { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
+      {
+        $group: {
+          _id: "$userId",
+          totalMessages: { $sum: 1 }
+        }
+      },
+      { $match: { totalMessages: { $gt: userTotal } } },
+      { $count: "countGreater" }
+    ]).toArray();
+
+    const countGreater = (greaterAgg[0] && greaterAgg[0].countGreater) || 0;
+
+    // ранг = количество пользователей с большим count + 1
+    const rank = countGreater + 1;
+
+    // 3) получить общее число пользователей в периоде
+    const totalUsersAgg = await this.messagesCollection.aggregate([
+      { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
+      { $group: { _id: "$userId" } },
+      { $count: "cnt" }
+    ]).toArray();
+
+    const totalUsers = (totalUsersAgg[0] && totalUsersAgg[0].cnt) || 0;
+
+    var percentage = totalUsers > 0 ? Number(((rank / totalUsers) * 100)) : null;
+    if (percentage >= 0.1) {
+      percentage = percentage.toFixed(2);
+    } else {
+      percentage = percentage.toFixed(4);
+    }
     return {
       userId,
-      totalMessages: 0,
-      rank: null,
-      percentage: null,
-      totalUsers: totalUsers[0] ? totalUsers[0].cnt : 0
+      totalMessages: userTotal,
+      rank,
+      percentage,
+      totalUsers
     };
   }
-
-  // 2) посчитать, сколько пользователей имеют totalMessages > userTotal
-  // для этого сначала агрегируем кол-во сообщений у всех пользователей, затем фильтруем по > userTotal
-  const greaterAgg = await this.messagesCollection.aggregate([
-    { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
-    {
-      $group: {
-        _id: "$userId",
-        totalMessages: { $sum: 1 }
-      }
-    },
-    { $match: { totalMessages: { $gt: userTotal } } },
-    { $count: "countGreater" }
-  ]).toArray();
-
-  const countGreater = (greaterAgg[0] && greaterAgg[0].countGreater) || 0;
-
-  // ранг = количество пользователей с большим count + 1
-  const rank = countGreater + 1;
-
-  // 3) получить общее число пользователей в периоде
-  const totalUsersAgg = await this.messagesCollection.aggregate([
-    { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
-    { $group: { _id: "$userId" } },
-    { $count: "cnt" }
-  ]).toArray();
-
-  const totalUsers = (totalUsersAgg[0] && totalUsersAgg[0].cnt) || 0;
-
-  var percentage = totalUsers > 0 ? Number(((rank / totalUsers) * 100)) : null;
-  if (percentage >= 0.1) {
-    percentage = percentage.toFixed(2);
-  } else {
-    percentage = percentage.toFixed(4);
-  }
-  return {
-    userId,
-    totalMessages: userTotal,
-    rank,
-    percentage,
-    totalUsers
-  };
-}
 
   async getTopWords(limit, channel, period) {
     await this.ensureInitialized();

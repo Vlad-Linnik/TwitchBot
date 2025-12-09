@@ -15,7 +15,7 @@ const botInitInfo = {
   "OAUTHtoken": process.env.OAUTHtoken,
   "Client_Id": process.env.Client_Id,
   "channels": [channel],
-  "version": "0.2.0",
+  "version": "0.2.1",
   "startTime": startTime
 }
 
