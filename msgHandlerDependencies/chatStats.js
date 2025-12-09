@@ -29,9 +29,9 @@ class ChatStats {
     }
   }
 
-  async isCommandExist(command) {
+  async isCommandExist(channel, command) {
     await this.ensureInitialized();
-    return !! await this.customCommandsCollection.findOne( {command} );
+    return !! await this.customCommandsCollection.findOne( {channel:channel, command:command} );
   }
 
   async getAllCommands(channel) {
