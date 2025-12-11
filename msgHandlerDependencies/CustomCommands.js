@@ -45,8 +45,6 @@ class CustomCommands {
         ChatStats.addNewCustomCommand(channel, newCommand, CommandResult);
         this.CommandsDict[channel][newCommand] = {result: CommandResult, timer: null};
         this.CommandsKeysList[channel] = Object.keys(this.CommandsDict[channel]).sort((a,b) => b.length - a.length);
-        console.log(this.CommandsDict);
-        console.log(this.CommandsKeysList);
         client.say(channel, `@${userState["username"]} Команда успешно добавлена ✅`);
         return 1;
       }

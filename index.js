@@ -24,6 +24,11 @@ client.on("chat", async (channel, userState, message, self) => {
   if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase()))
     ChatStats.addMessage(userState["user-id"], userState["username"], message, channel);
 
+  // spam protection
+  if (msgHandle.spam_protection(client, channel, userState, message)) {
+    return; // stop processing if spam detected
+  }
+
   // direct msg to this bot
   if (message.match(/chatwizardbot/)) {
     if (msgHandle.directMsgCheck(client, channel, userState, message)) {
@@ -31,7 +36,7 @@ client.on("chat", async (channel, userState, message, self) => {
     }
   }
   // ! commands
-  if (message.match(/!/)) {
+  if (message.match(/^!/)) {
     if (msgHandle.execCommands(client, channel, userState, message)) {
       return;
     }
