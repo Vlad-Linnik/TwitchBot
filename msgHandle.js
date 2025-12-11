@@ -54,6 +54,25 @@ function check_2args_command(args) {
   return "day";
 }
 
+async function spam_protection(client, channel, userState, message) {
+  if (isMod(userState)) {
+    return;
+  }
+  if (!message.match(/^-_-/)) {
+    return;
+  }
+  if (userState["first-msg"]) {
+    Twitch_ban_API.ban(userState["user-id"], userState["room-id"], "spam bot");
+    return;
+  }
+  Twitch_ban_API.timeout(
+    userState["user-id"],
+    1200,
+    userState["room-id"],
+    "spam bot"
+  );
+}
+
 function directMsgCheck(client, channel, userState, message) {
   // direct message to this bot
   if (message.match(/@chatwizardbot/)) {
@@ -266,5 +285,6 @@ async function execCommands(client, channel, userState, message) {
 module.exports = {
   directMsgCheck: directMsgCheck,
   execCommands: execCommands,
-  randomEventsAndThings: randomEventsAndThings
+  randomEventsAndThings: randomEventsAndThings,
+  spam_protection: spam_protection
 };
