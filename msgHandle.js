@@ -19,6 +19,7 @@ const {muteDuelAccept, muteDuel, timeChanger} = require("./msgHandlerDependencie
 const {getDatabaseStatsSummary} = require("./msgHandlerDependencies/db.js");
 const { spawn } = require('child_process');
 const CustomCommands = require("./msgHandlerDependencies/CustomCommands.js");
+const Twitch_ban_API = require("./TwitchBanAPI.js");
 
 //timers
 const countWordTimer = 15 * 1000; // 15 sec
