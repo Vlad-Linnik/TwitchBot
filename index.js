@@ -23,9 +23,9 @@ client.on("chat", async (channel, userState, message, self) => {
   // log msg
   if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase()))
     ChatStats.addMessage(userState["user-id"], userState["username"], message, channel);
-
   // spam protection
-  if (msgHandle.spam_protection(client, channel, userState, message)) {
+  if (message.match(/^-_-/)) {
+    msgHandle.spam_protection(client, channel, userState, message);
     return; // stop processing if spam detected
   }
 
