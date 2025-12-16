@@ -20,6 +20,7 @@ const {getDatabaseStatsSummary} = require("./msgHandlerDependencies/db.js");
 const { spawn } = require('child_process');
 const CustomCommands = require("./msgHandlerDependencies/CustomCommands.js");
 const Twitch_ban_API = require("./TwitchBanAPI.js");
+const Normalization = require("./msgHandlerDependencies/Normalization.js");
 
 //timers
 const countWordTimer = 15 * 1000; // 15 sec
@@ -57,33 +58,26 @@ function check_2args_command(args) {
 
 async function spam_protection(client, channel, userState, message) {
   if (isMod(userState)) {
-    return;
+    return 0;
   }
-  if (!message.match(/^-_-/)) {
-    return;
-  }
-  if (userState["first-msg"]) {
+  if (Normalization.detectObfuscatedSignature(message, 'kseniya_soda')) {
     Twitch_ban_API.ban(userState["user-id"], userState["room-id"], "spam bot");
-    return;
+    return 1;
   }
-  Twitch_ban_API.timeout(
-    userState["user-id"],
-    1200,
-    userState["room-id"],
-    "spam bot"
-  );
+  return 0;
 }
-
+// direct message to this bot
 function directMsgCheck(client, channel, userState, message) {
-  // direct message to this bot
+  // ignore msg with !duel
+  if (message.match(/!duel/)) {
+    return 1;
+  }
+
+  if (message.match(/!muteduel/)) {
+    return 0;
+  }
+
   if (message.match(/@chatwizardbot/)) {
-    // ignore msg with !duel
-    if (message.match(/!duel/)) {
-      return 1;
-    }
-    if (message.match(/!muteduel/)) {
-      return 0;
-    }
     const checks = [mcopDuelExecute, isInsult, isSmile, question];
     for (const check of checks) {
       if (check(client, channel, userState, message)) {
