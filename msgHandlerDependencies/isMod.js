@@ -4,7 +4,8 @@ const isMod = (userState) => {
   }
   if (
     "moderator" in userState["badges"] ||
-    "broadcaster" in userState["badges"]
+    "broadcaster" in userState["badges"]||
+    "lead_moderator" in userState["badges"]
   ) {
     return true;
   }

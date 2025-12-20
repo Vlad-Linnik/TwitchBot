@@ -42,7 +42,7 @@ async function getDatabaseStatsSummary(dbName = 'twitch_chat_stats', collectionN
   // Использовано/свободно на диске
   const free = stats.fsTotalSize - stats.fsUsedSize;
 
-  return `Total records: ${totalRecords}, First record: ${firstRecordDate}, Used: ${formatBytes(stats.dataSize)} / Free: ${formatBytes(free)}`;
+  return `Total records: ${totalRecords}, First record: ${firstRecordDate}, Used: ${formatBytes(stats.dataSize)}`;
 }
 
 module.exports = { 
