@@ -30,7 +30,7 @@ class CustomCommands {
     addCommand = async(client, channel, userState, message) => 
     {
       if (!isMod(userState)) {return 0;}
-      var res = message.match(/!addcommand !([a-z-0-9]+) (.+)/);
+      var res = message.match(/!addcommand !([a-zа-я0-9]+) (.+)/);
       if (!res) 
       {
         if (message.startsWith("!addcommand")) {
@@ -59,7 +59,7 @@ class CustomCommands {
   deleteCustomCommand = async(client, channel, userState, message) => 
   {
     if (!isMod(userState)) {return 0;}
-    var res = message.match(/!delcommand !([a-z-0-9]+)/);
+    var res = message.match(/!delcommand !([a-zа-я0-9]+)/);
     if (!res) return 0;
     if (!ChatStats.isCommandExist(channel, res[1]))
     { 

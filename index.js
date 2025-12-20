@@ -2,7 +2,6 @@ const botInitInfo = require("./botInitInfo.js");
 const tmi = require("tmi.js");
 const msgHandle = require("./msgHandle.js");
 const ChatStats = require('./msgHandlerDependencies/chatStats.js');
-
 // bot settings
 const opts = {
   options: {
