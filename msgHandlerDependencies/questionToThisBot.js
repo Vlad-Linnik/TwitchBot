@@ -16,6 +16,9 @@ function question(client, channel, userState, message) {
           "Нет",
           "Не могу сказать",
           "eeeh ",
+          "Возможно",
+          "50/50",
+          "Скорее да, чем нет"
         ].random()}`
       );
       lastQuestionTime.set(channel, new Date().getTime());

@@ -1,6 +1,6 @@
 const axios = require("axios");
 const botInitInfo = require("./botInitInfo.js");
-// max and min values of timeout for twitch
+
 const max_timeout = 1_209_600; // equivalent to 2 weeks
 const min_timeout = 1;
 
@@ -23,7 +23,6 @@ async function timeout(userId, duration, broadcasterId, reason = "No reason") {
   try {
     await axios.post(url, data, { headers: headers });
   } catch (error) {
-    //console.error(error);
   }
 }
 // /ban
@@ -45,7 +44,6 @@ async function ban(userId, broadcasterId, reason = "No reason") {
     await axios.post(url, data, { headers: headers });
   } catch (error) {
     console.log("timeout error!");
-    //console.error(error);
   }
 }
 

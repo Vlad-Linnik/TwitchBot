@@ -12,17 +12,7 @@ for (channel in botInitInfo.channels) {
 }
 var cumulativeEffectDelay = 150_000;
 var smiles_arr = [
-  "mcopDULYA ",
-  "FeelsRainMan ",
-  "mericCat ",
-  "peepoBox ",
-  "peepoBanana ",
-  "SadgeCry ",
-  "NOOOO ",
-  "Offline ",
-  "peepoRage ",
-  "Rasengan ",
-  "peepoRIP",
+  "peepoSad"
 ];
 
 function isInsult(client, channel, userState, message) {

@@ -1,4 +1,3 @@
-const { isSmile } = require("./msgHandlerDependencies/SmileHandler.js");
 const { isInsult } = require("./msgHandlerDependencies/isInsult.js");
 const { isMod } = require("./msgHandlerDependencies/isMod.js");
 const {
@@ -18,7 +17,7 @@ const botInitInfo = require("./botInitInfo.js");
 const {muteDuelAccept, muteDuel, timeChanger} = require("./msgHandlerDependencies/muteDuel.js");
 const {getDatabaseStatsSummary} = require("./msgHandlerDependencies/db.js");
 const { spawn } = require('child_process');
-const CustomCommands = require("./msgHandlerDependencies/CustomCommands.js");
+const {customCommands, counter} = require("./msgHandlerDependencies/CustomCommands.js");
 const Twitch_ban_API = require("./TwitchBanAPI.js");
 const Normalization = require("./msgHandlerDependencies/Normalization.js");
 
@@ -38,6 +37,8 @@ var lastCountUserMsg = 0;
 const countUniqueTimer = 15 * 1000; // 15 sec
 var lastcountUnique = 0;
 
+const countDirectMSGTimer = 15 * 1000; // 15 sec
+var lastDirectMSG = 0;
 // utilities
 var possible_periods = ["day", "week", "month", "all"];
 var period_text_list = {"day": "сегодня", "week": "неделю", "month": "месяц", "all": "все время"};
@@ -78,13 +79,12 @@ function directMsgCheck(client, channel, userState, message) {
   }
 
   if (message.match(/@chatwizardbot/)) {
-    const checks = [mcopDuelExecute, isInsult, isSmile, question];
+    const checks = [mcopDuelExecute, isInsult, question];
     for (const check of checks) {
       if (check(client, channel, userState, message)) {
         return 1;
       }
     }
-
     var answer = [
       "я сейчас занят, играю peepoSitGamer ",
       "I'm busy xyliNado",
@@ -93,8 +93,12 @@ function directMsgCheck(client, channel, userState, message) {
       "я сейчас занят, гуляю ppHop ",
       "я сейчас занят, на рыбалке Fishinge ",
       "я сейчас занят, ем пиццу peepoPizza",
+      "froglance"
     ];
-    client.say(channel, `@${userState["username"]} ${answer.random()}`);
+    if (isTimerReady(lastDirectMSG, countDirectMSGTimer)){
+      client.say(channel, `@${userState["username"]} ${answer.random()}`);
+      lastDirectMSG = new Date().getTime();
+    }
     return 1;
   }
   return 0;
@@ -113,14 +117,9 @@ async function get_bot_info (client, channel, userState, message) {
 }
 
 function restartBot (client, channel, userState, message) {
-  if (!["vlad_261", "mistercop"].includes(userState.username)) return 0;
-
   if (isMod(userState) && message.toLocaleLowerCase().match(/^!restartbot/)) {
     client.say(channel, `@${userState["username"]} restarting...`);
     var bat_file_name = 'start.bat';
-    if (channel.match(/vlad_261/)) {
-      bat_file_name = 'start_test.bat';
-    }
     spawn('cmd.exe', ['/c', bat_file_name], {
       detached: true,
       stdio: 'ignore'
@@ -259,11 +258,16 @@ async function execCommands(client, channel, userState, message) {
     restartBot
   ];
   const asyncCommandsCheck = [
-    CustomCommands.getAllCustomCommands,
+    customCommands.getAllCustomCommands,
     get_bot_info, topChatters,topSmiles,countWord,countUserMsg,addRemWordToWhiteList,count_unique, 
-    CustomCommands.addCommand,
-    CustomCommands.deleteCustomCommand,
-    CustomCommands.exex_custom_command
+    customCommands.addCommand,
+    customCommands.deleteCustomCommand,
+    customCommands.exex_custom_command,
+    counter.addCounter,
+    counter.deleteCounter,
+    counter.updateCounter,
+    counter.getCountersList
+
   ]
   for (const cmd of asyncCommandsCheck) {
     if ( await cmd(client, channel, userState, message)) {
