@@ -19,6 +19,7 @@ const client = new tmi.client(opts);
 client.on("chat", async (channel, userState, message, self) => {
   // Don't listen to my own messages..
   if (self) return;
+  if (userState["username"].toLocaleLowerCase() == 'moobot') return;
   // log msg
   if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase()))
     ChatStats.addMessage(userState["user-id"], userState["username"], message, channel);
@@ -35,7 +36,7 @@ client.on("chat", async (channel, userState, message, self) => {
     }
   }
   // ! commands
-  if (message.match(/^!/)) {
+  if (message.match(/^!|^#/)) {
     if (msgHandle.execCommands(client, channel, userState, message)) {
       return;
     }

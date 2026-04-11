@@ -16,6 +16,7 @@ class ChatStats {
       this.wordsCollection = db.collection('words');
       this.whiteListCollection = db.collection('whiteList');
       this.customCommandsCollection = db.collection("custom_commands");
+      this.countersCollection = db.collection("counters");
       this.dbInitialized = true;
       console.log('DB collections initialized');
     } catch (err) {
@@ -48,6 +49,8 @@ class ChatStats {
     await this.ensureInitialized();
     this.customCommandsCollection.insertOne({channel, command, result, timer});
   } 
+
+
 
   async deleteCustomCommand(channel, command) {
     await this.ensureInitialized();
@@ -337,6 +340,62 @@ class ChatStats {
       console.error('Ошибка при получении уникальных пользователей:', err);
       return 0;
     }
+  }
+
+  // Counter methods
+    async addNewCounter(channel, counter_name, access) {
+    await this.ensureInitialized();
+    this.countersCollection.insertOne({channel, counter_name, count: 0, access, exceptions: []});
+  }
+
+  async changeCounterAccess(channel, counter_name, new_access) {
+    await this.ensureInitialized();
+    this.countersCollection.updateOne({channel:channel, counter_name:counter_name}, 
+    {
+      $set: {access: new_access}
+    });
+  }
+
+  async changeCounterExceptions(channel, counter_name, new_exceptions) {
+    await this.ensureInitialized();
+    this.countersCollection.updateOne({channel:channel, counter_name:counter_name}, 
+    {
+      $set: {exceptions: new_exceptions}
+    });
+  }
+
+  async isCounterExist(channel, counter_name) {
+    await this.ensureInitialized();
+    return !! await this.countersCollection.findOne( {channel:channel, counter_name:counter_name} );
+  }
+
+  async updateCounter(channel, counter_name, new_count) {
+    await this.ensureInitialized();
+    this.countersCollection.updateOne({channel:channel, counter_name:counter_name}, 
+    {
+      $set: {count: new_count}
+    });
+  }
+  
+  async deleteCounter(channel, counter_name) {
+    await this.ensureInitialized();
+    this.countersCollection.deleteOne({channel:channel, counter_name:counter_name});
+  }
+
+  async getCounter(channel, counter_name){
+    await this.ensureInitialized();
+    var Counter = await this.countersCollection.find({channel: channel, counter_name: counter_name}).toArray();
+    return Counter;
+  }
+
+  async getAllCounters(channel) {
+    await this.ensureInitialized();
+    var Counters = await this.countersCollection.find({channel: channel}).toArray();
+    var CommandsDict = {};
+    for (const counter of Counters) {
+        CommandsDict[counter["counter_name"]] = counter["count"];
+    }
+    return CommandsDict;
   }
 
 }
