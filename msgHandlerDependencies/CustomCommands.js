@@ -180,9 +180,11 @@ class CustomCommands {
         if (!isTimerReady(this.lastCustomCommand, this.customCommandsTimer)) return 1;
         var commandResult = this.CommandsDict[channel][cmd]["result"];
         var res = commandResult.match(/#([a-zа-я0-9]+)/g);
-        for(const wordReplace of res) {
-          if(counter.counterKeysList[channel].includes(wordReplace.substring(1))){
-            commandResult = commandResult.replace(wordReplace, counter.counters[channel][wordReplace.substring(1)].toString());
+        if (res){
+          for(const wordReplace of res) {
+            if(counter.counterKeysList[channel].includes(wordReplace.substring(1))){
+              commandResult = commandResult.replace(wordReplace, counter.counters[channel][wordReplace.substring(1)].toString());
+            }
           }
         }
         client.say(channel, commandResult);
