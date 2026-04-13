@@ -182,69 +182,53 @@ class ChatStats {
     await this.ensureInitialized();
 
     const startDate = this.selectPeriod(period);
-    const endDate = new Date();
+    const now = new Date();
 
-    // 1) получить количество сообщений пользователя за период
-    const userAgg = await this.messagesCollection.aggregate([
-      { $match: { channel, userId, timestamp: { $gte: startDate, $lte: endDate } } },
-      { $group: { _id: "$userId", totalMessages: { $sum: 1 } } }
+    // 1. Получаем ВЕСЬ список активных юзеров за период, отсортированный по кол-ву сообщений
+    // Это гарантирует, что мы видим всю картину целиком и одновременно
+    const fullTop = await this.messagesCollection.aggregate([
+      { 
+        $match: { 
+          channel, 
+          timestamp: { $gte: startDate, $lte: now } 
+        } 
+      },
+      { 
+        $group: { 
+          _id: "$userId", 
+          count: { $sum: 1 } 
+        } 
+      },
+      { $sort: { count: -1 } }
     ]).toArray();
 
-    const userTotal = (userAgg[0] && userAgg[0].totalMessages) || 0;
+    const totalUsers = fullTop.length;
 
-    if (userTotal === 0) {
-      // если у пользователя нет сообщений в периоде — можно вернуть сразу
-      // но всё равно посчитаем общее количество пользователей для полной информации
-      const totalUsers = await this.getUniqueUsersCount(channel, period);
+    // 2. Ищем нашего пользователя в этом списке
+    const userIndex = fullTop.findIndex(item => item._id === userId);
 
+    if (userIndex === -1) {
       return {
         userId,
         totalMessages: 0,
         rank: null,
         percentage: null,
-        totalUsers: totalUsers[0] ? totalUsers[0].cnt : 0
+        totalUsers
       };
     }
 
-    // 2) посчитать, сколько пользователей имеют totalMessages > userTotal
-    // для этого сначала агрегируем кол-во сообщений у всех пользователей, затем фильтруем по > userTotal
-    const greaterAgg = await this.messagesCollection.aggregate([
-      { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
-      {
-        $group: {
-          _id: "$userId",
-          totalMessages: { $sum: 1 }
-        }
-      },
-      { $match: { totalMessages: { $gt: userTotal } } },
-      { $count: "countGreater" }
-    ]).toArray();
+    const userTotal = fullTop[userIndex].count;
+    const rank = userIndex + 1; // Индекс 0 станет рангом 1
 
-    const countGreater = (greaterAgg[0] && greaterAgg[0].countGreater) || 0;
+    // 3. Математически корректный процент
+    // Если ты 1-й из 2-х: (1 / 2) * 100 = 50%
+    let percentage = (rank / totalUsers) * 100;
 
-    // ранг = количество пользователей с большим count + 1
-    const rank = countGreater + 1;
-
-    // 3) получить общее число пользователей в периоде
-    const totalUsersAgg = await this.messagesCollection.aggregate([
-      { $match: { channel, timestamp: { $gte: startDate, $lte: endDate } } },
-      { $group: { _id: "$userId" } },
-      { $count: "cnt" }
-    ]).toArray();
-
-    const totalUsers = (totalUsersAgg[0] && totalUsersAgg[0].cnt) || 0;
-
-    var percentage = totalUsers > 0 ? Number(((rank / totalUsers) * 100)) : null;
-    if (percentage >= 0.1) {
-      percentage = percentage.toFixed(2);
-    } else {
-      percentage = percentage.toFixed(4);
-    }
     return {
       userId,
       totalMessages: userTotal,
       rank,
-      percentage,
+      percentage: percentage >= 0.1 ? percentage.toFixed(2) : percentage.toFixed(4),
       totalUsers
     };
   }
