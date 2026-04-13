@@ -257,7 +257,7 @@ async function execCommands(client, channel, userState, message) {
   ];
   const asyncCommandsCheck = [
     customCommands.getAllCustomCommands,
-    get_bot_info, topChatters,topSmiles,countWord,countUserMsg,addRemWordToWhiteList,count_unique, 
+    get_bot_info, topChatters,topSmiles,countUserMsg,addRemWordToWhiteList,count_unique, 
     customCommands.addCommand,
     customCommands.deleteCustomCommand,
     customCommands.exex_custom_command,

@@ -1,8 +1,17 @@
 const { connect } = require('./db.js');
 
+const wordPatterns = [
+  /\b\w+\b/g,                         // обычные слова
+  /[=:;8xX][\-']?[)(\\\/|*DdPpOo]+/g, // смайлики :) :D :P
+  /(?:^|\s)([!?]+)(?=\s|$)/g,         // повторяющиеся ! или ?
+  /(?:^|\s)([\)]+)(?=\s|$)/g,         // повторяющиеся )    /(?:^|\s)([\(]+)(?=\s|$)/g          // повторяющиеся (
+];
+
+
 class ChatStats {
   constructor() {
     this.dbInitialized = false;
+    this.whiteListCache = new Set();
     this.messagesCollection = null;
     this.whiteListCollection = null;
     this.wordsCollection = null;
@@ -17,6 +26,12 @@ class ChatStats {
       this.whiteListCollection = db.collection('whiteList');
       this.customCommandsCollection = db.collection("custom_commands");
       this.countersCollection = db.collection("counters");
+
+      await this.messagesCollection.createIndex({ channel: 1, timestamp: -1, userId: 1 });
+      await this.wordsCollection.createIndex({ channel: 1, date: -1 });
+      await this.whiteListCollection.createIndex({ word: 1 }, { unique: true });
+      const list = await this.whiteListCollection.find({}).toArray();
+      this.whiteListCache = new Set(list.map(item => item.word));
       this.dbInitialized = true;
       console.log('DB collections initialized');
     } catch (err) {
@@ -121,17 +136,17 @@ class ChatStats {
       { $set: { word } },
       { upsert: true }
     );
+    this.whiteListCache.add(word);
   }
 
   async removeFromWhiteList(word) {
     await this.ensureInitialized();
     await this.whiteListCollection.deleteOne({ word });
+    this.whiteListCache.delete(word);
   }
 
-  async isInWhiteList(word) {
-    await this.ensureInitialized();
-    const found = await this.whiteListCollection.findOne({ word });
-    return !!found;
+  isInWhiteList(word) {
+    return this.whiteListCache.has(word);
   }
 
   async addMessage(userId, userName, message, channel) {
@@ -146,87 +161,74 @@ class ChatStats {
       timestamp
     });
 
-  // Новый подход к извлечению "слов"
-  const wordPatterns = [
-    /\b\w+\b/g,                         // обычные слова
-    /[=:;8xX][\-']?[)(\\\/|*DdPpOo]+/g, // смайлики :) :D :P
-    /(?:^|\s)([!?]+)(?=\s|$)/g,         // повторяющиеся ! или ?
-    /(?:^|\s)([\)]+)(?=\s|$)/g,         // повторяющиеся )
-    /(?:^|\s)([\(]+)(?=\s|$)/g          // повторяющиеся (
-  ];
 
-  let words = [];
-  for (const pattern of wordPatterns) {
-    const matches = message.match(pattern) || [];
-    words = [...words, ...matches];
-  }
+    let words = [];
+    for (const pattern of wordPatterns) {
+      const matches = message.match(pattern) || [];
+      words = [...words, ...matches];
+    }
 
-  // Удаляем возможные пробелы в начале/конце
-  words = words.map(w => w.trim()).filter(w => w.length > 0);
+    words = words.map(w => w.trim()).filter(w => w.length > 0);
 
 
-  for (const word of words) {
-    const isAllowed = await this.isInWhiteList(word);
-    if (!isAllowed) continue;
-    var today = new Date();
-    today.setHours(12, 0, 0, 0);
-    this.wordsCollection.updateOne(
-      { word, channel, date: today },
-      { $inc: { count: 1 } },
-      { upsert: true }
-      );
+    const allowedWords = words.filter(word => this.isInWhiteList(word));
+
+    if (allowedWords.length > 0) {
+      const today = new Date();
+      today.setHours(12, 0, 0, 0);
+
+      const wordCounts = {};
+      allowedWords.forEach(w => wordCounts[w] = (wordCounts[w] || 0) + 1);
+
+      const operations = Object.keys(wordCounts).map(word => ({
+        updateOne: {
+          filter: {word, channel, date: today},
+          update: {$inc: { count: wordCounts[word] } },
+          upsert: true
+        }
+      }));
+      this.wordsCollection.bulkWrite(operations, { ordered: false}).catch(err => {
+        console.error('Bulk write error', err);
+      });
     }
   }
 
-  async getUserRank(userId, channel, period) {
+async getUserRank(userId, channel, period) {
     await this.ensureInitialized();
-
     const startDate = this.selectPeriod(period);
     const now = new Date();
 
-    // 1. Получаем ВЕСЬ список активных юзеров за период, отсортированный по кол-ву сообщений
-    // Это гарантирует, что мы видим всю картину целиком и одновременно
-    const fullTop = await this.messagesCollection.aggregate([
-      { 
-        $match: { 
-          channel, 
-          timestamp: { $gte: startDate, $lte: now } 
-        } 
-      },
-      { 
-        $group: { 
-          _id: "$userId", 
-          count: { $sum: 1 } 
-        } 
-      },
-      { $sort: { count: -1 } }
-    ]).toArray();
+    // 1. Получаем количество сообщений конкретного пользователя
+    const userStatsPipeline = [
+      { $match: { channel, userId, timestamp: { $gte: startDate, $lte: now } } },
+      { $count: "totalMessages" }
+    ];
+    const userStats = await this.messagesCollection.aggregate(userStatsPipeline).toArray();
+    const userTotalMessages = userStats.length > 0 ? userStats[0].totalMessages : 0;
 
-    const totalUsers = fullTop.length;
+    // Получаем общее количество пользователей
+    const totalUsers = await this.getUniqueUsersCount(channel, period);
 
-    // 2. Ищем нашего пользователя в этом списке
-    const userIndex = fullTop.findIndex(item => item._id === userId);
-
-    if (userIndex === -1) {
-      return {
-        userId,
-        totalMessages: 0,
-        rank: null,
-        percentage: null,
-        totalUsers
-      };
+    if (userTotalMessages === 0) {
+      return { userId, totalMessages: 0, rank: null, percentage: null, totalUsers };
     }
 
-    const userTotal = fullTop[userIndex].count;
-    const rank = userIndex + 1; // Индекс 0 станет рангом 1
-
-    // 3. Математически корректный процент
-    // Если ты 1-й из 2-х: (1 / 2) * 100 = 50%
+    // 2. Считаем, сколько людей написали БОЛЬШЕ сообщений (это и даст нам ранг)
+    const rankPipeline = [
+      { $match: { channel, timestamp: { $gte: startDate, $lte: now } } },
+      { $group: { _id: "$userId", count: { $sum: 1 } } },
+      { $match: { count: { $gt: userTotalMessages } } },
+      { $count: "usersAbove" }
+    ];
+    const rankResult = await this.messagesCollection.aggregate(rankPipeline).toArray();
+    const usersAbove = rankResult.length > 0 ? rankResult[0].usersAbove : 0;
+    
+    const rank = usersAbove + 1;
     let percentage = (rank / totalUsers) * 100;
 
     return {
       userId,
-      totalMessages: userTotal,
+      totalMessages: userTotalMessages,
       rank,
       percentage: percentage >= 0.1 ? percentage.toFixed(2) : percentage.toFixed(4),
       totalUsers
