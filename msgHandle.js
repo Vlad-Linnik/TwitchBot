@@ -10,7 +10,6 @@ const { question } = require("./msgHandlerDependencies/questionToThisBot.js");
 const {
   getDota2RandomItem,
 } = require("./msgHandlerDependencies/randomEvents.js");
-const { customMath } = require("./msgHandlerDependencies/myMath.js");
 const { isTimerReady } = require("./msgHandlerDependencies/timer.js");
 const ChatStats = require('./msgHandlerDependencies/chatStats.js');
 const botInitInfo = require("./botInitInfo.js");
@@ -253,7 +252,6 @@ async function execCommands(client, channel, userState, message) {
   const commandCheck = [
     muteDuel,
     muteDuelAccept,
-    customMath,
     getDota2RandomItem,
     restartBot
   ];
