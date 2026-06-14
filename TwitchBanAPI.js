@@ -6,9 +6,10 @@ const min_timeout = 1;
 
 // /timeout
 async function timeout(userId, duration, broadcasterId, reason = "No reason") {
+  console.log(`ban:${userId}`);
   const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo["bot_id"]}`;
   const headers = {
-    Authorization: `Bearer ${botInitInfo["OAUTHtoken"]}`,
+    Authorization: `Bearer ${botInitInfo["password"]}`,
     "Client-Id": botInitInfo["Client_Id"],
     "Content-Type": "application/json",
   };
@@ -29,7 +30,7 @@ async function timeout(userId, duration, broadcasterId, reason = "No reason") {
 async function ban(userId, broadcasterId, reason = "No reason") {
   const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo["bot_id"]}`;
   const headers = {
-    Authorization: `Bearer ${botInitInfo["OAUTHtoken"]}`,
+    Authorization: `Bearer ${botInitInfo["password"]}`,
     "Client-Id": botInitInfo["Client_Id"],
     "Content-Type": "application/json",
   };

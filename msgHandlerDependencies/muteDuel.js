@@ -80,7 +80,7 @@ function muteDuel(client, channel, userState, message) {
         .slice(1);
     }
     //skip this names
-    if (["chatwizardbot"].includes(name)) {
+    if ([botInitInfo.username].includes(name)) {
       return 1;
     }
     if (message.toLowerCase().match(/ ([0-9]+)/)) {
