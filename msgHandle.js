@@ -106,23 +106,8 @@ async function get_bot_info (client, channel, userState, message) {
   if (isMod(userState) && message.toLocaleLowerCase().match(/!botinfo/)){
     var DBstats = await getDatabaseStatsSummary();
     var timeD = new Date() - botInitInfo["startTime"];
-    var info = `@${userState["username"]} bot version ${botInitInfo["version"]}, `+
-     `works: ${timeChanger(timeD/1000)}, `+
-     DBstats;
+    var info = `@${userState["username"]} works: ${timeChanger(timeD/1000)}`;
     client.say(channel, info);
-    return 1;
-  }
-  return 0;
-}
-
-function restartBot (client, channel, userState, message) {
-  if (isMod(userState) && message.toLocaleLowerCase().match(/^!restartbot/)) {
-    client.say(channel, `@${userState["username"]} restarting...`);
-    var bat_file_name = 'start.bat';
-    spawn('cmd.exe', ['/c', bat_file_name], {
-      detached: true,
-      stdio: 'ignore'
-    }).unref();
     return 1;
   }
   return 0;
