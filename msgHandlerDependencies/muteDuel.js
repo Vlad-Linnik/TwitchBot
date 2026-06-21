@@ -30,7 +30,7 @@ function initializeMuteDuelInfo() {
   };
 }
 
-for (const channel of botInitInfo.channels) {
+for (const channel of Object.keys(botInitInfo.channels)) {
   const channelName = `#${channel}`;
 
 
@@ -72,7 +72,7 @@ function muteDuel(client, channel, userState, message) {
   let timeout = MINIMUM_DUEL_TIMEOUT;
   if (match) {
     if (duelDelayCheck(channel, userState)) return 1;
-    if (!client.isMod(channel, `#${botInitInfo.username}`)) return 1;
+    if (!client.isMod(channel, `#${botInitInfo.settings.username}`)) return 1;
     if (message.toLowerCase().match(/(@\w+)/)) {
       name = message
         .toLowerCase()
@@ -80,7 +80,7 @@ function muteDuel(client, channel, userState, message) {
         .slice(1);
     }
     //skip this names
-    if ([botInitInfo.username].includes(name)) {
+    if ([botInitInfo.settings.username].includes(name)) {
       return 1;
     }
     if (message.toLowerCase().match(/ ([0-9]+)/)) {

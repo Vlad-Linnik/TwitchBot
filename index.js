@@ -4,20 +4,20 @@ const msgHandle = require("./msgHandle.js");
 const ChatStats = require('./msgHandlerDependencies/chatStats.js');
 const axios = require('axios');
 const TokenManager = require('./TokenManager.js');
+const EventManager = require('./events.js');
+const ActivityTracker = require('./ActivitiTracker.js');
 
-
-const channelIdsCache = {};
 
 // bot settings
 const opts = {
   options: {
-    debug: true,
+    debug: false,
   },
   identity: {
-    username: botInitInfo["username"],
-    password: botInitInfo["password"],
+    username: botInitInfo.settings["username"],
+    password: botInitInfo.settings["password"],
   },
-  channels: botInitInfo["channels"],
+  channels: Object.keys(botInitInfo.channels),
 };
 
 // create bot instance
@@ -26,7 +26,7 @@ const client = new tmi.client(opts);
 // overload client.say with new Helix API
 client.say = async (channel, message) => {
     const normalizedChannel = channel.toLowerCase().replace('#', '');
-    const broadcasterId = channelIdsCache[normalizedChannel];
+    const broadcasterId = botInitInfo.channels[normalizedChannel].id;
 
     if (!broadcasterId) {
         console.error(`[API] Error msg send to ${channel}: ID is not exist.`);
@@ -37,13 +37,13 @@ client.say = async (channel, message) => {
         await axios.post('https://api.twitch.tv/helix/chat/messages', 
             {
                 broadcaster_id: broadcasterId,
-                sender_id: botInitInfo["bot_id"],
+                sender_id: botInitInfo.settings["bot_id"],
                 message: message
             },
             {
                 headers: {
-                    'Authorization': `Bearer ${botInitInfo["appAccessToken"]}`,
-                    'Client-Id': botInitInfo["Client_Id"],
+                    'Authorization': `Bearer ${botInitInfo.settings["appAccessToken"]}`,
+                    'Client-Id': botInitInfo.settings["Client_Id"],
                     'Content-Type': 'application/json'
                 }
             }
@@ -58,9 +58,6 @@ client.say = async (channel, message) => {
 // main
 client.on("chat", async (channel, userState, message, self) => {
   const normalizedChannel = channel.toLowerCase().replace('#', '');
-  if (userState["room-id"]) {
-      channelIdsCache[normalizedChannel] = userState["room-id"];
-  }
 
   // Don't listen to my own messages..
   if (self) return;
@@ -95,7 +92,13 @@ client.on("chat", async (channel, userState, message, self) => {
 // startup
 async function start() {
   await TokenManager.start(client);
-  client.opts.identity.password = botInitInfo["password"];
+  client.opts.identity.password = botInitInfo.settings["password"];
+  for(let channel of Object.keys(botInitInfo.channels) ) {
+    TwitchEvent = new EventManager(`${botInitInfo.channels[channel].id}`);
+    TwitchEvent.connect();
+    ModsActivitiTracker = new ActivityTracker(botInitInfo.channels[channel].id);
+    ModsActivitiTracker.start();
+  }
   client.connect();
 }
 

@@ -1,4 +1,5 @@
 const { connect } = require('./db.js');
+const { timeChanger } = require('./muteDuel.js');
 
 const wordPatterns = [
   /\b\w+\b/g,                         // обычные слова
@@ -16,6 +17,10 @@ class ChatStats {
     this.whiteListCollection = null;
     this.wordsCollection = null;
     this.customCommandsCollection = null;
+    this.modLogs = null;
+    this.modStats = null;
+    this.modList = null;
+    this.modsUpTimeStats = null;
   }
 
   async initialize() {
@@ -26,7 +31,14 @@ class ChatStats {
       this.whiteListCollection = db.collection('whiteList');
       this.customCommandsCollection = db.collection("custom_commands");
       this.countersCollection = db.collection("counters");
+      this.modLogs = db.collection("ModeratorActionLogs");
+      this.modStats = db.collection("ModeratorStatistics");
+      this.modList = db.collection("ModsList");
+      this.modsUpTimeStats = db.collection("ModUpTimeStats");
 
+      await this.modsUpTimeStats.createIndex({ channelId: 1, timestamp: -1});
+      await this.modList.createIndex({ channelId: 1 }, { unique: true });
+      await this.modLogs.createIndex({ channel: 1, timestamp: -1, userId: 1 });
       await this.messagesCollection.createIndex({ channel: 1, timestamp: -1, userId: 1 });
       await this.wordsCollection.createIndex({ channel: 1, date: -1 });
       await this.whiteListCollection.createIndex({ word: 1 }, { unique: true });
@@ -43,6 +55,120 @@ class ChatStats {
     if (!this.dbInitialized) {
       await this.initialize();
     }
+  }
+
+  async updateModUpTime(channelId, UpTimeData) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const allTimeDate = new Date(0); 
+
+    await this.ensureInitialized();
+    const operations = [];
+
+    const timestamps = [today, allTimeDate];
+
+    for (const ts of timestamps) {
+      operations.push({
+        updateOne: {
+          filter: { channelId: channelId, timestamp: ts },
+          update: { 
+            $setOnInsert: { channelId: channelId, timestamp: ts, UpTimeData: [] } 
+          },
+          upsert: true
+        }
+      });
+    }
+
+    for (const [userId, modData] of Object.entries(UpTimeData)) {
+      const minutesNum = Number(modData.totalMinutes) || 0;
+      const hoursNum = Math.round((minutesNum / 60) * 1000) / 1000;
+      const lastSeenDate = modData.lastSeen;
+
+      for (const ts of timestamps) {
+        operations.push({
+          updateOne: {
+            filter: { 
+              channelId: channelId, 
+              timestamp: ts, 
+              "UpTimeData.user_id": userId 
+            },
+            update: {
+              $inc: { "UpTimeData.$.hours": hoursNum },
+              $set: { "UpTimeData.$.lastSeen": lastSeenDate }
+            }
+          }
+        });
+        operations.push({
+          updateOne: {
+            filter: { 
+              channelId: channelId, 
+              timestamp: ts, 
+              "UpTimeData.user_id": { $ne: userId } 
+            },
+            update: {
+              $push: {
+                UpTimeData: { 
+                  user_id: userId, 
+                  hours: hoursNum, 
+                  lastSeen: lastSeenDate 
+                } 
+              }
+            }
+          }
+        });
+      }
+    }
+
+    try {
+      if (operations.length > 0) {
+        await this.modsUpTimeStats.bulkWrite(operations, { ordered: true });
+      }
+    } catch (err) {
+      console.error('[DB] updatemoduptime Error:', err);
+    }
+  }
+
+  async getModeratorsList(channelId) {
+    await this.ensureInitialized();
+    try {
+      const answer = await this.modList.findOne(
+        {channelId: channelId}
+      );
+      return answer;
+    } catch (err) {
+      console.error('[DB] Error:', err);
+    }
+  }
+
+  async updateModeratorList(channelId, ModList) {
+    await this.ensureInitialized();
+    try {
+      const result = this.modList.updateOne(
+        {channelId: channelId},
+        {
+          $set: {
+            channelId: channelId,
+            moderators: ModList,
+            updatedAt: new Date()
+          }
+        },
+        { upsert: true }
+      );
+      console.log(result);
+    } catch (err) {
+      console.error('[DB]',err);
+      }
+  } 
+
+  async addModeratorAction(channel, modID, userId, action, timestamp, reason) {
+    await this.ensureInitialized();
+    let User_msg = await this.messagesCollection.findOne(
+      {'userId': userId, 'channel': `#${channel}`},
+      {sort: {timestamp: -1}}
+    );
+    console.log("mesage:", User_msg);
+    const TTA = timestamp - new Date(User_msg.timestamp)
+    this.modLogs.insertOne({channel, modID, userId, action, reason, timestamp, TTA});
   }
 
   async isCommandExist(channel, command) {
@@ -329,7 +455,7 @@ async getUserRank(userId, channel, period) {
   }
 
   // Counter methods
-    async addNewCounter(channel, counter_name, access) {
+  async addNewCounter(channel, counter_name, access) {
     await this.ensureInitialized();
     this.countersCollection.insertOne({channel, counter_name, count: 0, access, exceptions: []});
   }

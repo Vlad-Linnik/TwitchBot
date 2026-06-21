@@ -9,7 +9,7 @@ class Counter {
     this.counters = {};
     this.counterKeysList = [];
     this.channelsList = [];
-    for (var ch of botInitInfo["channels"]) 
+    for (var ch of Object.keys(botInitInfo.channels)) 
     {
       this.channelsList.push("#"+ch);
     }
@@ -112,7 +112,7 @@ class CustomCommands {
       this.CommandsKeysList = {};
       this.CommandsDict = {};
       this.channelsList = [];
-      for (var ch of botInitInfo["channels"]) 
+      for (var ch of Object.keys(botInitInfo.channels)) 
       {
         this.channelsList.push("#"+ch);
       }

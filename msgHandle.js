@@ -105,7 +105,7 @@ function directMsgCheck(client, channel, userState, message) {
 async function get_bot_info (client, channel, userState, message) {
   if (isMod(userState) && message.toLocaleLowerCase().match(/!botinfo/)){
     var DBstats = await getDatabaseStatsSummary();
-    var timeD = new Date() - botInitInfo["startTime"];
+    var timeD = new Date() - botInitInfo.settings["startTime"];
     var info = `@${userState["username"]} works: ${timeChanger(timeD/1000)}`;
     client.say(channel, info);
     return 1;

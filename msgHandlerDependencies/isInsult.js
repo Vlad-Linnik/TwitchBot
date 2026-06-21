@@ -6,9 +6,9 @@ const botInitInfo = require("../botInitInfo.js");
 
 var lastInsultTime = new Map();
 var extraTime = new Map();
-for (channel in botInitInfo.channels) {
-  lastInsultTime.set("#" + botInitInfo.channels[channel], 0);
-  extraTime.set("#" + botInitInfo.channels[channel], 0);
+for (channel of Object.keys(botInitInfo.channels)) {
+  lastInsultTime.set("#" + channel, 0);
+  extraTime.set("#" + channel, 0);
 }
 var cumulativeEffectDelay = 150_000;
 var smiles_arr = [
@@ -20,7 +20,7 @@ function isInsult(client, channel, userState, message) {
   var res = message.match(MyRegex.insultsRegex);
   if (Boolean(res)) {
     // if bot not a moderator
-    if (!client.isMod(channel, "#" + botInitInfo["username"])) {
+    if (!client.isMod(channel, "#" + botInitInfo.settings["username"])) {
       client.say(channel, `@${userState["username"]} XyliPizdish `);
       return 1;
     }

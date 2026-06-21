@@ -5,9 +5,9 @@ const botInitInfo = require("../botInitInfo.js");
 
 var lastRandomDota2ItemTime = new Map();
 var lastMaaaanEventTime = new Map();
-for (var i = 0; i < botInitInfo.channels.length; i++) {
-  lastRandomDota2ItemTime.set("#" + botInitInfo.channels[i], 0);
-  lastMaaaanEventTime.set("#" + botInitInfo.channels[i], 0);
+for (channel of Object.keys(botInitInfo.channels)) {
+  lastRandomDota2ItemTime.set("#" + channel, 0);
+  lastMaaaanEventTime.set("#" + channel, 0);
 }
 
 function randomEventsAndThings(client, channel, userState, message) {
@@ -23,7 +23,7 @@ function randomEventsAndThings(client, channel, userState, message) {
   var maaaaan_regex = /@(\w+) maaaaan/;
   resp = message.match(maaaaan_regex);
   if (resp) {
-    if (resp[1] != botInitInfo["username"]) {
+    if (resp[1] != botInitInfo.settings["username"]) {
       if (isTimerReady(lastMaaaanEventTime, randomEventTimeDelay)) {
         lastMaaaanEventTime = new Date().getTime();
         client.say(channel, `@${resp[1]} maaaaan`);

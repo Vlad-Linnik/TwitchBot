@@ -1,8 +1,8 @@
 const { isTimerReady } = require("./timer.js");
 const botInitInfo = require("../botInitInfo.js");
 var lastQuestionTime = new Map();
-for (channel in botInitInfo.channels) {
-  lastQuestionTime.set("#" + botInitInfo.channels[channel], 0);
+for (channel of Object.keys(botInitInfo.channels)) {
+  lastQuestionTime.set("#" + channel, 0);
 }
 var questionTimeDelay = 30_000;
 function question(client, channel, userState, message) {
