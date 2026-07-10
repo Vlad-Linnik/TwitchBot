@@ -1,18 +1,26 @@
 const axios = require('axios');
-const botInitInfo = require('./botInitInfo');
-const ChatStats = require('./msgHandlerDependencies/chatStats.js');
+const botInitInfo = require('../botInitInfo');
+const ChatStats = require('../db/chatStats.js');
+const streamStatus = require('./streamStatus.js');
+const moderators = require('./moderators.js');
 
 
 class ModActivityTracker {
-    constructor(broadcasterId, checkIntervalMs = 300000) {
+    constructor(broadcasterId, channelLogin, checkIntervalMs = 300000) {
         this.broadcasterId = broadcasterId;
+        this.channelLogin = channelLogin;
         this.intervalMs = checkIntervalMs;
         this.timer = null;
-        this.moderatorsList = null;
-        this.activityData = {}; //  { mod_id: { user_id: '...', totalMinutes: 0, lastSeen: Date } }
         this.isLive = true;
+        this.isChecking = false; // guards against overlapping runs if a cycle takes longer than intervalMs
+        this.lastCheckTime = null; // used to compute real elapsed delta between checks
+        this.lastStatsDate = null; // local calendar date (toDateString()) daily mod stats were last recorded for,
+                                    // guards against recomputing every time the stream flaps offline within the same day
     }
 
+    // Returns true/false when the stream's status was confirmed, or null when the check itself
+    // failed - a transient API/network error is NOT evidence the stream went offline, so callers
+    // must treat null as "unknown, try again next cycle" rather than as a real transition.
     async isStreamLive() {
         try {
             const response = await axios.get('https://api.twitch.tv/helix/streams', {
@@ -24,24 +32,11 @@ class ModActivityTracker {
                     'Client-Id': botInitInfo.settings['Client_Id']
                 }
             });
-            if (response.data && response.data.data && response.data.data.length > 0) {
-                return true;
-            }
-            
-            return false;
+            return !!(response.data && response.data.data && response.data.data.length > 0);
         } catch (error) {
             console.error('[ModTracker] Error Stream status:', error.response?.data || error.message);
-            return false; 
+            return null;
         }
-    }
-
-    async getMods() {
-        let res = new Set();
-        const BD_answer = await ChatStats.getModeratorsList(`${this.broadcasterId}`);
-        BD_answer.moderators.forEach(id => {
-            res.add(id);
-        });
-        return res;
     }
 
     async getAllChatters() {
@@ -75,37 +70,87 @@ class ModActivityTracker {
     }
 
     async checkActivity() {
-        let isLive = await this.isStreamLive();
-        if(!isLive) {
-            if(this.isLive) {
-                console.log('[ModTracker] Stream is offline');
-                this.isLive = false;
-            }
+        // A previous cycle (slow API, big chatter list) can still be running when the next
+        // tick fires; without this guard both would read/write this.lastCheckTime concurrently
+        // and double-count the same wall-clock window into ModUpTimeStats.
+        if (this.isChecking) {
+            console.log('[ModTracker] Previous check still in progress, skipping this tick.');
             return;
         }
-        this.isLive = true;
-        console.log('[ModTracker] Scanning ...');
-        const currentChatters = await this.getAllChatters();
-        const minutesAdded = this.intervalMs / 60000; 
-        currentChatters.forEach(chatter => {
-            if (this.moderatorsList.has(chatter.user_id)) {
-                if (!this.activityData[chatter.user_id]) {
-                    this.activityData[chatter.user_id] = { totalMinutes: 0, lastSeen: null };
-                }
-                this.activityData[chatter.user_id].totalMinutes += minutesAdded;
-                this.activityData[chatter.user_id].lastSeen = new Date();
+        this.isChecking = true;
+
+        try {
+            // Read fresh every cycle so mod/unmod EventSub updates (see events.js) are picked
+            // up without needing a bot restart - the cache itself is updated in real time, so
+            // this is just a synchronous read, not a network call.
+            const currentModerators = moderators.getModerators(this.broadcasterId);
+
+            const liveResult = await this.isStreamLive();
+            const now = Date.now();
+
+            if (liveResult === null) {
+                // Status unknown this cycle - don't touch isLive/lastCheckTime/streamStatus,
+                // and don't treat it as an offline transition. Just retry next cycle.
+                return;
             }
-        });
-        console.log(this.activityData);
-        this.saveToDatabase();
+
+            streamStatus.setLive(this.broadcasterId, liveResult);
+
+            if (!liveResult) {
+                if (this.isLive) {
+                    console.log('[ModTracker] Stream is offline');
+                    this.isLive = false;
+                    this.recordDailyModeratorStats(currentModerators);
+                }
+                // Don't let an offline gap get counted as activity time once the stream comes back.
+                this.lastCheckTime = null;
+                return;
+            }
+
+            const wasLiveWithBaseline = this.isLive && this.lastCheckTime !== null;
+            this.isLive = true;
+
+            console.log('[ModTracker] Scanning ...');
+            const currentChatters = await this.getAllChatters();
+
+            // Use real elapsed time since the last successful check when we have a baseline,
+            // otherwise fall back to the configured interval (first check after start/restart/resume).
+            const intervalStart = wasLiveWithBaseline ? new Date(this.lastCheckTime) : new Date(now - this.intervalMs);
+            const intervalEnd = new Date(now);
+            this.lastCheckTime = now;
+
+            const activeModIds = currentChatters
+                .map(chatter => chatter.user_id)
+                .filter(userId => currentModerators.has(userId));
+
+            if (activeModIds.length > 0) {
+                console.log('[ModTracker] Active moderators:', activeModIds);
+                this.saveToDatabase(activeModIds, intervalStart, intervalEnd);
+            }
+        } finally {
+            this.isChecking = false;
+        }
     }
 
-    saveToDatabase() {
-        ChatStats.updateModUpTime(this.broadcasterId, this.activityData);
+    saveToDatabase(activeModIds, intervalStart, intervalEnd) {
+        ChatStats.updateModUpTime(this.broadcasterId, activeModIds, intervalStart, intervalEnd)
+            .catch(err => console.error('[ModTracker] updateModUpTime error:', err));
+    }
+
+    // Fired once per calendar day, right as the stream goes offline - that moment marks the
+    // day's moderation activity as "done" without needing a separate cron schedule. Uses the
+    // local calendar date (matching the local setHours(0,0,0,0) bucketing chatStats.js uses for
+    // the actual day-range queries) rather than UTC, so the guard can't disagree with the data.
+    recordDailyModeratorStats(currentModerators) {
+        const today = new Date().toDateString();
+        if (this.lastStatsDate === today) return;
+        this.lastStatsDate = today;
+
+        ChatStats.recordDailyModeratorStats(this.broadcasterId, this.channelLogin, [...currentModerators])
+            .catch(err => console.error('[ModTracker] recordDailyModeratorStats error:', err));
     }
 
     async start() {
-        this.moderatorsList = await this.getMods();
         await this.checkActivity();
         this.timer = setInterval(() => this.checkActivity(), this.intervalMs);
         console.log(`[ModTracker] ${this.broadcasterId} running... Interval = ${this.intervalMs / 1000} seconds.`);
@@ -113,7 +158,6 @@ class ModActivityTracker {
 
     stop() {
         if (this.timer) clearInterval(this.timer);
-        if (this.modUpdateTimer) clearInterval(this.modUpdateTimer);
         console.log('[ModTracker] Stopt.');
     }
 }

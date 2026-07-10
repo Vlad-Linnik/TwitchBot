@@ -1,25 +1,20 @@
-const { isTimerReady } = require("./timer.js");
+const { isTimerReady } = require("../shared/timer.js");
 const botInitInfo = require("../botInitInfo.js");
+const channelSettings = require("../config/channelSettings.js");
 var lastQuestionTime = new Map();
 for (channel of Object.keys(botInitInfo.channels)) {
   lastQuestionTime.set("#" + channel, 0);
 }
-var questionTimeDelay = 30_000;
 function question(client, channel, userState, message) {
   if (message.includes("?")) {
+    const settings = channelSettings.getSettings(channel);
+    if (!settings.commands.question.enabled) return 0;
     // timer
-    if (isTimerReady(lastQuestionTime.get(channel), questionTimeDelay)) {
+    if (isTimerReady(lastQuestionTime.get(channel), settings.commands.question.cooldownMs)) {
       client.say(
         channel,
-        `@${userState["username"]} ${[
-          "Да",
-          "Нет",
-          "Не могу сказать",
-          "eeeh ",
-          "Возможно",
-          "50/50",
-          "Скорее да, чем нет"
-        ].random()}`
+        settings.responses.yesNo.random(),
+        userState["id"]
       );
       lastQuestionTime.set(channel, new Date().getTime());
       return 1;

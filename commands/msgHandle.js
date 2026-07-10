@@ -1,43 +1,37 @@
-const { isInsult } = require("./msgHandlerDependencies/isInsult.js");
-const { isMod } = require("./msgHandlerDependencies/isMod.js");
+const { isInsult } = require("../games/isInsult.js");
+const { isMod } = require("../shared/isMod.js");
 const {
   mcopDuelExecute,
-} = require("./msgHandlerDependencies/duelFromMrCopusBot.js");
+} = require("../games/duelFromMrCopusBot.js");
 const {
   randomEventsAndThings,
-} = require("./msgHandlerDependencies/randomEvents.js");
-const { question } = require("./msgHandlerDependencies/questionToThisBot.js");
+} = require("../games/randomEvents.js");
+const { question } = require("../games/questionToThisBot.js");
 const {
   getDota2RandomItem,
-} = require("./msgHandlerDependencies/randomEvents.js");
-const { isTimerReady } = require("./msgHandlerDependencies/timer.js");
-const ChatStats = require('./msgHandlerDependencies/chatStats.js');
-const botInitInfo = require("./botInitInfo.js");
-const {muteDuelAccept, muteDuel, timeChanger} = require("./msgHandlerDependencies/muteDuel.js");
-const {getDatabaseStatsSummary} = require("./msgHandlerDependencies/db.js");
+} = require("../games/randomEvents.js");
+const { isTimerReady } = require("../shared/timer.js");
+const ChatStats = require('../db/chatStats.js');
+const botInitInfo = require("../botInitInfo.js");
+const {muteDuelAccept, muteDuel, timeChanger} = require("../games/muteDuel.js");
+const {getDatabaseStatsSummary} = require("../db/db.js");
 const { spawn } = require('child_process');
-const {customCommands, counter} = require("./msgHandlerDependencies/CustomCommands.js");
-const Twitch_ban_API = require("./TwitchBanAPI.js");
-const Normalization = require("./msgHandlerDependencies/Normalization.js");
+const {customCommands, counter} = require("./CustomCommands.js");
+const Twitch_ban_API = require("../twitch/TwitchBanAPI.js");
+const Normalization = require("../shared/Normalization.js");
+const channelSettings = require("../config/channelSettings.js");
+const { syncChannelEmoteSet } = require("../sevenTv/SevenTvEmotes.js");
 
-//timers
-const countWordTimer = 15 * 1000; // 15 sec
-var lastCountWord = 0;
+// timers - per-channel maps so a cooldown in one channel doesn't block another;
+// cooldown durations themselves come from that channel's settings.
+var lastCountWord = new Map();
+var lastTopUsers = new Map();
+var lasttopSmiles = new Map();
+var lastCountUserMsg = new Map();
+var lastcountUnique = new Map();
+var lastDirectMSG = new Map();
+var lastUpdateSevenTv = new Map();
 
-const topUsersTimer = 15 * 1000; // 15 sec
-var lastTopUsers = 0;
-
-const topSmilesTimer = 15 * 1000; // 15 sec
-var lasttopSmiles = 0;
-
-const countUserMsgTimer = 15 * 1000; // 15 sec
-var lastCountUserMsg = 0;
-
-const countUniqueTimer = 15 * 1000; // 15 sec
-var lastcountUnique = 0;
-
-const countDirectMSGTimer = 15 * 1000; // 15 sec
-var lastDirectMSG = 0;
 // utilities
 var possible_periods = ["day", "week", "month", "all"];
 var period_text_list = {"day": "сегодня", "week": "неделю", "month": "месяц", "all": "все время"};
@@ -60,9 +54,12 @@ async function spam_protection(client, channel, userState, message) {
   if (isMod(userState)) {
     return 0;
   }
-  if (Normalization.detectObfuscatedSignature(message, 'kseniya_soda')) {
-    Twitch_ban_API.ban(userState["user-id"], userState["room-id"], "spam bot");
-    return 1;
+  const spamSignatures = channelSettings.getSettings(channel).spamSignatures;
+  for (const signature of spamSignatures) {
+    if (Normalization.detectObfuscatedSignature(message, signature)) {
+      Twitch_ban_API.ban(userState["user-id"], userState["room-id"], "spam bot");
+      return 1;
+    }
   }
   return 0;
 }
@@ -73,7 +70,7 @@ function directMsgCheck(client, channel, userState, message) {
     return 1;
   }
 
-  if (message.match(/!muteduel/)) {
+  if (message.match(channelSettings.getCommandSignatureRegex(channel, 'muteduel', 'signature', { anchored: false }))) {
     return 0;
   }
 
@@ -84,54 +81,52 @@ function directMsgCheck(client, channel, userState, message) {
         return 1;
       }
     }
-    var answer = [
-      "я сейчас занят, играю peepoSitGamer ",
-      "I'm busy xyliNado",
-      "xyliNado",
-      "я сейчас занят, пью кофе Kobold ",
-      "я сейчас занят, гуляю ppHop ",
-      "я сейчас занят, на рыбалке Fishinge ",
-      "я сейчас занят, ем пиццу peepoPizza",
-      "froglance"
-    ];
-    if (isTimerReady(lastDirectMSG, countDirectMSGTimer)){
-      client.say(channel, `@${userState["username"]} ${answer.random()}`);
-      lastDirectMSG = new Date().getTime();
+    const settings = channelSettings.getSettings(channel);
+    if (settings.commands.directmsg.enabled && isTimerReady(lastDirectMSG.get(channel) || 0, settings.commands.directmsg.cooldownMs)){
+      client.say(channel, settings.responses.busy.random(), userState["id"]);
+      lastDirectMSG.set(channel, Date.now());
     }
     return 1;
   }
   return 0;
 }
 async function get_bot_info (client, channel, userState, message) {
-  if (isMod(userState) && message.toLocaleLowerCase().match(/!botinfo/)){
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.botinfo.enabled) return 0;
+  const regex = channelSettings.getCommandSignatureRegex(channel, 'botinfo', 'signature', { anchored: false });
+  if (isMod(userState) && message.toLocaleLowerCase().match(regex)){
     var DBstats = await getDatabaseStatsSummary();
     var timeD = new Date() - botInitInfo.settings["startTime"];
-    var info = `@${userState["username"]} works: ${timeChanger(timeD/1000)}`;
-    client.say(channel, info);
+    var info = `works: ${timeChanger(timeD/1000)}`;
+    client.say(channel, info, userState["id"]);
     return 1;
   }
   return 0;
 }
 
 async function count_unique(client, channel, userState, message) {
-  if (!message.toLocaleLowerCase().match(/^!countunique/)) {return 0;}
-  if (isTimerReady(lastcountUnique, countUniqueTimer)){
-    lastcountUnique = new Date().getTime();
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.countunique.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'countunique'))) {return 0;}
+  if (isTimerReady(lastcountUnique.get(channel) || 0, settings.commands.countunique.cooldownMs)){
+    lastcountUnique.set(channel, Date.now());
   }else{return 1;}
-  var args = message.toLocaleLowerCase().match(/!countunique (\w+)/);
+  var args = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'countunique', '(\\w+)'));
   var period = check_2args_command(args);
   var res =  await ChatStats.getUniqueUsersCount(channel, period);
-  client.say(channel, `@${userState["username"]} уникальных пользователей: ${res} за ${period_text_list[period]}`);
+  client.say(channel, `уникальных пользователей: ${res} за ${period_text_list[period]}`, userState["id"]);
 }
 
 async function topChatters(client, channel, userState, message) {
-  if (!message.toLocaleLowerCase().match(/^!topchatters/)) return 0;
-  if (isTimerReady(lastTopUsers, topUsersTimer)){
-    lastTopUsers = new Date().getTime();
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.topchatters.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'topchatters'))) return 0;
+  if (isTimerReady(lastTopUsers.get(channel) || 0, settings.commands.topchatters.cooldownMs)){
+    lastTopUsers.set(channel, Date.now());
   }else{return 1;}
   let topSize = 7;
   let showTop =  5;
-  let args = message.toLocaleLowerCase().match(/!topchatters (\w+)/);
+  let args = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'topchatters', '(\\w+)'));
   let period = check_2args_command(args);
   let TopUsers = await ChatStats.getTopUsers(topSize, channel, period);
   let top_smiles = ["👑","🥈","🥉","🍬","🍬"];
@@ -151,11 +146,13 @@ async function topChatters(client, channel, userState, message) {
 
 
 async function topSmiles(client, channel, userState, message) {
-  if (!message.toLocaleLowerCase().match(/^!topsmiles/)) return  0;
-  if (isTimerReady(lasttopSmiles, topSmilesTimer)){
-    lasttopSmiles = new Date().getTime();
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.topsmiles.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'topsmiles'))) return  0;
+  if (isTimerReady(lasttopSmiles.get(channel) || 0, settings.commands.topsmiles.cooldownMs)){
+    lasttopSmiles.set(channel, Date.now());
   }else{return 1;}
-  let args = message.toLocaleLowerCase().match(/!topsmiles (\w+)/);
+  let args = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'topsmiles', '(\\w+)'));
   let topSize = 5;
   let period = check_2args_command(args);
   var answer = `🏆 Топ смайлов за ${period_text_list[period]}: `;
@@ -168,67 +165,81 @@ async function topSmiles(client, channel, userState, message) {
 }
 
 async function countWord(client, channel, userState, message) {
-  if (!message.toLocaleLowerCase().match(/^!countword/)) return 0;
-  var period = false;
-  if (isTimerReady(lastCountWord, countWordTimer)) {
-    lastCountWord = new Date().getTime();
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.countword.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'countword'))) return 0;
+  if (isTimerReady(lastCountWord.get(channel) || 0, settings.commands.countword.cooldownMs)) {
+    lastCountWord.set(channel, Date.now());
   }else{return 1;}
-  // 2 args
-  var res = message.toLocaleLowerCase().match(/!countword (\S+) (\w+)/);
-  if (res) {
-    period = res[2];
-    if (!possible_periods.includes(period)){
-      client.say(channel, `@${userState["username"]} Ожидалось: !countword СловоДляПоиска (day|week|month|all)  VoHiYo `);
-      return 1;
-    }
-  }else{
-    // 1 arg
-    var res = message.toLocaleLowerCase().match(/!countword (\S+)/);
-    // error
-    if (!res) {
-      client.say(channel, `@${userState["username"]} Ожидалось: !countword СловоДляПоиска  VoHiYo `);
+
+  var res = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'countword', '(\\S+)'));
+  if (!res) {
+    client.say(channel, `Ожидалось: ${settings.commands.countword.signature} СловоДляПоиска  VoHiYo `, userState["id"]);
     return 1;
-    }
-    period = "day"
-  }
-  if (period) {
-    var text_period = period_text_list[period];
-  }else {
-    var text_period = "день";
   }
   var keyWord = res[1];
-  var wordInfo = await ChatStats.countWordOccurrences(keyWord, channel, period);
-  client.say(channel, `@${userState["username"]} Найдено упоминаний: ${wordInfo} за ${text_period}`);
+  var wordInfo = await ChatStats.countWordOccurrences(keyWord, channel, "day");
+  client.say(channel, `Найдено упоминаний: ${wordInfo} за ${period_text_list["day"]}`, userState["id"]);
   return 1;
 }
 
 async function countUserMsg(client, channel, userState, message) {
-  if (!message.toLocaleLowerCase().match(/^!countmsg/)) return 0;
-  if(isTimerReady(lastCountUserMsg, countUserMsgTimer)) {
-    lastCountUserMsg = new Date().getTime();
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.countmsg.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'countmsg'))) return 0;
+  if(isTimerReady(lastCountUserMsg.get(channel) || 0, settings.commands.countmsg.cooldownMs)) {
+    lastCountUserMsg.set(channel, Date.now());
   }else{return 1;}
-  var args = message.toLocaleLowerCase().match(/!countmsg (\w+)/);
+  var args = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'countmsg', '(\\w+)'));
   var period = check_2args_command(args);
   var UserMsgCountInfo = await ChatStats.getUserRank(userState["user-id"], channel, period);
-  client.say(channel, `У пользователя @${userState["username"]} ${UserMsgCountInfo["totalMessages"]} сообщений, rank: ${UserMsgCountInfo["rank"]}, Top: ${UserMsgCountInfo["percentage"]}% за ${period_text_list[period]}`);
+  client.say(channel, `У вас ${UserMsgCountInfo["totalMessages"]} сообщений, rank: ${UserMsgCountInfo["rank"]}, Top: ${UserMsgCountInfo["percentage"]}% за ${period_text_list[period]}`, userState["id"]);
   return 1;
 }
 
 async function addRemWordToWhiteList(client, channel, userState, message) {
-  if (!message.match(/^!addword|^!remword/)) {return 0;}
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.addword.enabled) return 0;
+  const addSignature = channelSettings.escapeRegExp(settings.commands.addword.signature);
+  const remSignature = channelSettings.escapeRegExp(settings.commands.addword.remSignature);
+  if (!message.match(new RegExp(`^${addSignature}|^${remSignature}`))) {return 0;}
   if(!isMod(userState)) {return 0;}
-  var cmdArgs = message.match(/!addword (\w+)|!remword (\w+)/);
+  var cmdArgs = message.match(new RegExp(`${addSignature} (\\w+)|${remSignature} (\\w+)`));
   if (!cmdArgs) {
-    client.say(channel, `@${userState["username"]} ошибка VoHiYo `);
+    client.say(channel, `ошибка VoHiYo `, userState["id"]);
     return 1;
   }
-  if(message.toLocaleLowerCase().match(/!addword/)){
-    await ChatStats.addToWhiteList(cmdArgs[1]);
-    client.say(channel, `@${userState["username"]} слово "${cmdArgs[1]}" отслеживается ✅`);
+  if(message.toLocaleLowerCase().match(new RegExp(addSignature.toLowerCase()))){
+    await ChatStats.addToWhiteList(channel, cmdArgs[1]);
+    client.say(channel, `слово "${cmdArgs[1]}" отслеживается ✅`, userState["id"]);
     return 1;
   }
-  await ChatStats.removeFromWhiteList(cmdArgs[2]);
-  client.say(channel, `@${userState["username"]} слово "${cmdArgs[2]}" НЕ отслеживается ✅`);
+  await ChatStats.removeFromWhiteList(channel, cmdArgs[2]);
+  client.say(channel, `слово "${cmdArgs[2]}" НЕ отслеживается ✅`, userState["id"]);
+  return 1;
+}
+
+async function updateSevenTvEmotes(client, channel, userState, message) {
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.update7tv.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'update7tv'))) return 0;
+  if (!isMod(userState)) return 0;
+  if (isTimerReady(lastUpdateSevenTv.get(channel) || 0, settings.commands.update7tv.cooldownMs)) {
+    lastUpdateSevenTv.set(channel, Date.now());
+  } else { return 1; }
+
+  if (!settings.sevenTv?.emoteSetUrl) {
+    client.say(channel, `7TV сет не настроен для этого канала VoHiYo `, userState["id"]);
+    return 1;
+  }
+
+  try {
+    const { words } = await syncChannelEmoteSet(channel);
+    client.say(channel, `7TV эмоуты обновлены: ${words.length} ✅`, userState["id"]);
+  } catch (err) {
+    console.error('[7TV] Manual update failed:', err.message);
+    client.say(channel, `ошибка обновления 7TV VoHiYo `, userState["id"]);
+  }
   return 1;
 }
 
@@ -237,19 +248,22 @@ async function execCommands(client, channel, userState, message) {
   const commandCheck = [
     muteDuel,
     muteDuelAccept,
-    getDota2RandomItem,
-    restartBot
+    getDota2RandomItem
   ];
   const asyncCommandsCheck = [
     customCommands.getAllCustomCommands,
-    get_bot_info, topChatters,topSmiles,countUserMsg,addRemWordToWhiteList,count_unique, 
+    get_bot_info, topChatters,topSmiles,countUserMsg,addRemWordToWhiteList,updateSevenTvEmotes,count_unique,countWord,
     customCommands.addCommand,
     customCommands.deleteCustomCommand,
+    customCommands.setCommandTimer,
+    customCommands.setCommandPin,
     customCommands.exex_custom_command,
     counter.addCounter,
     counter.deleteCounter,
     counter.updateCounter,
-    counter.getCountersList
+    counter.getCountersList,
+    counter.addCustomCommandException,
+    counter.removeCustomCommandException
 
   ]
   for (const cmd of asyncCommandsCheck) {

@@ -1,10 +1,10 @@
 const path = require('path');
 const axios = require('axios');
-const botInitInfo = require("./botInitInfo.js");
+const botInitInfo = require("../botInitInfo.js");
 const fs = require('fs');
 
 function updateEnvVariable(key, value) {
-    const envPath = path.join(__dirname, '.env');
+    const envPath = path.join(__dirname, '..', '.env');
     
     if (!fs.existsSync(envPath)) {
         fs.writeFileSync(envPath, '');

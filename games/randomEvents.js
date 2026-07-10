@@ -1,4 +1,4 @@
-const { isTimerReady } = require("./timer.js");
+const { isTimerReady } = require("../shared/timer.js");
 const { dota2Items } = require("./dota2Items.js");
 const randomEventTimeDelay = 3 * 60 * 1000; //3 minutes deley
 const botInitInfo = require("../botInitInfo.js");

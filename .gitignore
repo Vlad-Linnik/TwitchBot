@@ -6,3 +6,8 @@ tools/
 test/
 .vs
 settings.json
+.claude
+config/channels/*.json
+!config/channels/default.json
+CLAUDE.md
+.gitignore

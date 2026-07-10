@@ -1,6 +1,6 @@
 require('dotenv').config();
 const startTime = new Date();
-const settings_cfg = require('./settings.json');
+const settings_cfg = require('./config/settings.json');
 
 
 const settings = {
@@ -11,7 +11,8 @@ const settings = {
   "Client_Id": process.env.Client_Id,
   "password": process.env.password,
   "appAccessToken": null,
-  "startTime": startTime
+  "startTime": startTime,
+  "debug": process.env.DEBUG_MODE === 'true'
 }
 const channels = settings_cfg.channels;
 

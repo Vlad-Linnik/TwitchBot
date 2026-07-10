@@ -1,12 +1,11 @@
 const axios = require("axios");
-const botInitInfo = require("./botInitInfo.js");
+const botInitInfo = require("../botInitInfo.js");
 
 const max_timeout = 1_209_600; // equivalent to 2 weeks
 const min_timeout = 1;
 
 // /timeout
 async function timeout(userId, duration, broadcasterId, reason = "No reason") {
-  console.log(`ban:${userId}`);
   const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo.settings["bot_id"]}`;
   const headers = {
     Authorization: `Bearer ${botInitInfo.settings["password"]}`,
