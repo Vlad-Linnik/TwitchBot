@@ -1,8 +1,9 @@
 // Import required modules and dependencies
-const { isTimerReady } = require("./timer.js");
-const { isMod } = require("./isMod.js");
-const TwitchBanAPI = require("../TwitchBanAPI.js");
+const { isTimerReady } = require("../shared/timer.js");
+const { isMod } = require("../shared/isMod.js");
+const TwitchBanAPI = require("../twitch/TwitchBanAPI.js");
 const botInitInfo = require("../botInitInfo.js");
+const channelSettings = require("../config/channelSettings.js");
 
 // Utility function to roll a dice with x sides
 function throwDiceDX(x) {
@@ -10,7 +11,6 @@ function throwDiceDX(x) {
 }
 
 // Constants for mute duel mechanics
-const MUTE_DUEL_DELAY = 50_000; // 3 minutes
 const MAX_TIMEOUT = 1_209_600; // Maximum timeout value in seconds
 const MINIMUM_DUEL_TIMEOUT = 300; // Minimum timeout value in seconds
 
@@ -30,7 +30,7 @@ function initializeMuteDuelInfo() {
   };
 }
 
-for (const channel of botInitInfo.channels) {
+for (const channel of Object.keys(botInitInfo.channels)) {
   const channelName = `#${channel}`;
 
 
@@ -55,24 +55,26 @@ function timeChanger(timeSeconds) {
 
 // Function to handle mute duel challenges
 function muteDuel(client, channel, userState, message) {
-  function duelDelayCheck(channel, userState) { 
+  function duelDelayCheck(channel, userState, cooldownMs) {
     const muteInfo = muteDuelInfo.get(channel);
-    if (!isTimerReady(muteInfo.timeStart, MUTE_DUEL_DELAY)) {
+    if (!isTimerReady(muteInfo.timeStart, cooldownMs)) {
       const remainingTime =
-        (MUTE_DUEL_DELAY - (Date.now() - muteInfo.timeStart)) / 1000;
+        (cooldownMs - (Date.now() - muteInfo.timeStart)) / 1000;
       const timePrefix = timeChanger(remainingTime);
-      client.say(channel, `@${userState.username} Я еще не готов, КД: ${Math.floor(timePrefix[0])} ${timePrefix[1]}`);
+      client.say(channel, `Я еще не готов, КД: ${Math.floor(timePrefix[0])} ${timePrefix[1]}`, userState.id);
       return 1;
     }
     return 0;
   }
 
-  let match = message.toLowerCase().match(/!muteduel/);
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.muteduel.enabled) return 0;
+  let match = message.toLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'muteduel', 'signature', { anchored: false }));
   let name = null;
   let timeout = MINIMUM_DUEL_TIMEOUT;
   if (match) {
-    if (duelDelayCheck(channel, userState)) return 1;
-    if (!client.isMod(channel, `#${botInitInfo.username}`)) return 1;
+    if (duelDelayCheck(channel, userState, settings.commands.muteduel.cooldownMs)) return 1;
+    if (!client.isMod(channel, `#${botInitInfo.settings.username}`)) return 1;
     if (message.toLowerCase().match(/(@\w+)/)) {
       name = message
         .toLowerCase()
@@ -80,7 +82,7 @@ function muteDuel(client, channel, userState, message) {
         .slice(1);
     }
     //skip this names
-    if (["chatwizardbot"].includes(name)) {
+    if ([botInitInfo.settings.username].includes(name)) {
       return 1;
     }
     if (message.toLowerCase().match(/ ([0-9]+)/)) {
@@ -98,16 +100,17 @@ function muteDuel(client, channel, userState, message) {
     muteDuelInfo.get(channel).usr1_mod = isMod(userState);
     muteDuelInfo.get(channel).timeStart = Date.now();
 
+    const acceptSignature = settings.commands.muteduel.acceptSignature;
     if (name == null) {
       client.say(
         channel,
-        `@${userState.username} вызывает чат на дуель ${timeout}s мута, !muteaccept - принять.`
+        `@${userState.username} вызывает чат на дуель ${timeout}s мута, ${acceptSignature} - принять.`
       );
       return 1;
     }
     client.say(
       channel,
-      `@${name} vs. @${userState.username} дуэль на ${timeout}s мута !muteaccept - принять.`
+      `@${name} vs. @${userState.username} дуэль на ${timeout}s мута ${acceptSignature} - принять.`
     );
     return 1;
   }
@@ -117,13 +120,14 @@ function muteDuel(client, channel, userState, message) {
 // Function to handle mute duel acceptance
 function muteDuelAccept(client, channel, userState, message) {
   const muteInfo = muteDuelInfo.get(channel);
+  const cooldownMs = channelSettings.getSettings(channel).commands.muteduel.cooldownMs;
   if (
-    isTimerReady(muteInfo.timeStart, MUTE_DUEL_DELAY) ||
+    isTimerReady(muteInfo.timeStart, cooldownMs) ||
     muteInfo["user1"] == null
   )
     return 0;
 
-  if (/!muteaccept/.test(message.toLowerCase())) {
+  if (channelSettings.getCommandSignatureRegex(channel, 'muteduel', 'acceptSignature', { anchored: false }).test(message.toLowerCase())) {
     if (muteInfo.user2 == null) {
       muteInfo.user2 = userState.username.toLowerCase();
     }

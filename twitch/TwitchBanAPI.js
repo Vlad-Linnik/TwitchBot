@@ -1,15 +1,15 @@
 const axios = require("axios");
-const botInitInfo = require("./botInitInfo.js");
+const botInitInfo = require("../botInitInfo.js");
 
 const max_timeout = 1_209_600; // equivalent to 2 weeks
 const min_timeout = 1;
 
 // /timeout
 async function timeout(userId, duration, broadcasterId, reason = "No reason") {
-  const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo["bot_id"]}`;
+  const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo.settings["bot_id"]}`;
   const headers = {
-    Authorization: `Bearer ${botInitInfo["OAUTHtoken"]}`,
-    "Client-Id": botInitInfo["Client_Id"],
+    Authorization: `Bearer ${botInitInfo.settings["password"]}`,
+    "Client-Id": botInitInfo.settings["Client_Id"],
     "Content-Type": "application/json",
   };
   const data = {
@@ -27,10 +27,10 @@ async function timeout(userId, duration, broadcasterId, reason = "No reason") {
 }
 // /ban
 async function ban(userId, broadcasterId, reason = "No reason") {
-  const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo["bot_id"]}`;
+  const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo.settings["bot_id"]}`;
   const headers = {
-    Authorization: `Bearer ${botInitInfo["OAUTHtoken"]}`,
-    "Client-Id": botInitInfo["Client_Id"],
+    Authorization: `Bearer ${botInitInfo.settings["password"]}`,
+    "Client-Id": botInitInfo.settings["Client_Id"],
     "Content-Type": "application/json",
   };
   const data = {

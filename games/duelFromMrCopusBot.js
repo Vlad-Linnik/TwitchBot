@@ -13,7 +13,7 @@ function mcopDuelExecute(client, channel, userState, message) {
     var res = message.match(/Победа за @(\w+)/);
     if (res) {
       var smile = "";
-      if (res[1] == botInitInfo["username"]) {
+      if (res[1] == botInitInfo.settings["username"]) {
         smile = "EZ ";
       } else {
         smile = "PoroSad";

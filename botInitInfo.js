@@ -1,16 +1,23 @@
 require('dotenv').config();
 const startTime = new Date();
+const settings_cfg = require('./config/settings.json');
 
 
-const botInitInfo = {
+const settings = {
   "username": process.env.BotUsername,
-  "password": process.env.password,
   "bot_id": process.env.bot_id,
-  "OAUTHtoken": process.env.OAUTHtoken,
+  "client_secret": process.env.client_secret,
+  "refresh_token": process.env.refresh_token,
   "Client_Id": process.env.Client_Id,
-  "channels": [process.env.channel],
-  "version": "0.2.3a",
-  "startTime": startTime
+  "password": process.env.password,
+  "appAccessToken": null,
+  "startTime": startTime,
+  "debug": process.env.DEBUG_MODE === 'true'
 }
+const channels = settings_cfg.channels;
 
-module.exports = botInitInfo;
+module.exports = 
+{
+  settings: settings, 
+  channels: channels
+};

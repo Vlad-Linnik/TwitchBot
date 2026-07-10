@@ -22,24 +22,15 @@ function formatBytes(bytes) {
 }
 
 async function getDatabaseStatsSummary(dbName = 'twitch_chat_stats', collectionName = "messages") {
-  // Подключаемся к базе
   const database = db || await connect();
   const collection = database.collection(collectionName);
-
-  // Количество документов
   const totalRecords = await collection.countDocuments();
-
-  // Дата первой записи (по timestamp)
   const oldestRecord = await collection.find({})
     .sort({ timestamp: 1 })
     .limit(1)
     .toArray();
   const firstRecordDate = oldestRecord[0]?.timestamp?.toISOString().split('T')[0] || '—';
-
-  // Статистика базы
   const stats = await database.command({ dbStats: 1 });
-
-  // Использовано/свободно на диске
   const free = stats.fsTotalSize - stats.fsUsedSize;
 
   return `Total records: ${totalRecords}, First record: ${firstRecordDate}, Used: ${formatBytes(stats.dataSize)}`;
