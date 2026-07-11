@@ -1,13 +1,13 @@
 // One-off migration: push this repo's file-based per-channel config
-// (config/channels/<login>.json, deep-merged over default.json via
-// config/channelSettings.js) into the TwitchBot-Web repo's `ChannelConfig`
+// (config/channels/<login>.json, deep-merged over channelSettings.js's
+// DEFAULT_CHANNEL_SETTINGS) into the TwitchBot-Web repo's `ChannelConfig`
 // Mongo collection, so the website has something to show/edit for channels
 // that were only ever configured via these JSON files.
 //
 // The write shape here mirrors TwitchBot-Web/db/channelConfigRepo.js by
 // hand (the two repos share no code) - if that shape changes, update this
-// script to match, the same way config/channels/default.json's shape is
-// kept in sync with TwitchBot-Web/config/defaultChannelConfig.json.
+// script to match, the same way channelSettings.js's DEFAULT_CHANNEL_SETTINGS
+// is kept in sync with TwitchBot-Web/config/defaultChannelConfig.json.
 //
 // Safe to re-run: a channel that already has a ChannelConfig doc is skipped
 // unless --force is given, so this won't silently clobber edits made from
@@ -63,7 +63,7 @@ async function main() {
 
     for (const file of channelFiles) {
       const login = path.basename(file, ".json").toLowerCase();
-      const merged = channelSettings.getSettings(login);
+      const merged = channelSettings.getSettingsFromFiles(login);
       const { bannedWords, spamSignatures, sevenTv, commands, responses } = merged;
 
       const existing = await channelConfigCol.findOne({ channelLogin: login });

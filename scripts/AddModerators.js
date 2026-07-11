@@ -19,9 +19,10 @@ async function main() {
     process.exit(1);
   }
 
+  await botInitInfo.loadChannels();
   const channelInfo = botInitInfo.channels[channelArg];
   if (!channelInfo) {
-    console.error(`Unknown channel "${channelArg}" - not found in config/settings.json`);
+    console.error(`Unknown channel "${channelArg}" - not registered in the Channels collection (run TwitchBot-Web/scripts/seedChannel.js) or config/settings.json`);
     process.exit(1);
   }
   const channelId = `${channelInfo.id}`;
