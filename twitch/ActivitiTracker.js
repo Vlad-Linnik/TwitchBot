@@ -126,7 +126,7 @@ class ModActivityTracker {
                 .filter(userId => currentModerators.has(userId));
 
             if (activeModIds.length > 0) {
-                console.log('[ModTracker] Active moderators:', activeModIds);
+                console.log(`[ModTracker] [${this.channelLogin}] Active moderators: ${activeModIds.length}`);
                 this.saveToDatabase(activeModIds, intervalStart, intervalEnd);
             }
         } finally {
