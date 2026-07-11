@@ -6,19 +6,28 @@ const ChatStats = require('../db/chatStats.js');
 const moderators = require('./moderators.js');
 
 class EventSubManager {
-    constructor(channelId) {
+    constructor(channelId, channelLogin) {
         this.channelId = channelId;
+        this.channelLogin = channelLogin || channelId;
         this.ws = null;
+        this.reconnectAttempts = 0;
+        this.reconnectTimer = null;
     }
 
-    connect() {
-        this.ws = new WebSocket('wss://eventsub.wss.twitch.tv/ws');
+    connect(url = 'wss://eventsub.wss.twitch.tv/ws') {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
 
-        this.ws.on('open', () => {
-            console.log('[EventSub] Connecting...');
+        const socket = new WebSocket(url);
+        this.ws = socket;
+
+        socket.on('open', () => {
+            console.log(`[EventSub] [${this.channelLogin}] Connecting...`);
         });
 
-        this.ws.on('message', async (data) => {
+        socket.on('message', async (data) => {
             const message = JSON.parse(data);
             const metadata = message.metadata;
             const payload = message.payload;
@@ -29,19 +38,42 @@ class EventSubManager {
 
             if (metadata.message_type === 'session_welcome') {
                 const sessionId = payload.session.id;
-                console.log(`[EventSub] Connected`);
+                this.reconnectAttempts = 0;
+                console.log(`[EventSub] [${this.channelLogin}] Connected`);
                 await this.subscribeToModeration(sessionId);
-            } 
+            }
             else if (metadata.message_type === 'notification') {
                 this.handleNotification(metadata, payload.event);
-            } 
+            }
             else if (metadata.message_type === 'session_reconnect') {
-                console.log('[EventSub] Требуется переподключение...');
+                // Twitch is about to drop this connection (planned maintenance/rebalance) and wants
+                // us to move to a fresh one before that happens. Open the new one now; Twitch closes
+                // the old socket itself once the new one is confirmed, which fires our 'close' handler
+                // below - the `this.ws !== socket` guard there stops that from triggering a second reconnect.
+                console.log(`[EventSub] [${this.channelLogin}] Reconnect requested by Twitch, switching connection...`);
+                this.connect(payload.session.reconnect_url);
             }
         });
 
-        this.ws.on('close', () => console.log('[EventSub] Conncection is cloased.'));
-        this.ws.on('error', (err) => console.error('[EventSub] Error WebSocket:', err));
+        socket.on('close', (code) => {
+            // Ignore closes from a socket we've already replaced (e.g. the old half of a
+            // session_reconnect handoff) - only the currently active socket should trigger a retry.
+            if (this.ws !== socket) return;
+            console.log(`[EventSub] [${this.channelLogin}] Connection closed (code ${code}).`);
+            this.scheduleReconnect();
+        });
+        socket.on('error', (err) => console.error(`[EventSub] [${this.channelLogin}] WebSocket error:`, err.message));
+    }
+
+    scheduleReconnect() {
+        if (this.reconnectTimer) return;
+        const delay = Math.min(30000, 1000 * 2 ** this.reconnectAttempts);
+        this.reconnectAttempts++;
+        console.log(`[EventSub] [${this.channelLogin}] Reconnecting in ${delay / 1000}s...`);
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            this.connect();
+        }, delay);
     }
 
     async subscribeToModeration(sessionId) {
@@ -64,9 +96,9 @@ class EventSubManager {
                     'Content-Type': 'application/json'
                 }
             });
-            console.log(`[EventSub] Subscribtion on channel.moderate: ${this.channelId}`);
+            console.log(`[EventSub] [${this.channelLogin}] Subscribtion on channel.moderate: ${this.channelId}`);
         } catch (error) {
-            console.error('[EventSub] Subscribtion Error:', error.response?.data || error.message);
+            console.error(`[EventSub] [${this.channelLogin}] Subscribtion Error:`, error.response?.data || error.message);
         }
     }
 

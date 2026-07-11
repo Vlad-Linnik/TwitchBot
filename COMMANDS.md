@@ -54,7 +54,7 @@ To prevent this, each counter enforces its own cooldown (`commands.counterUpdate
 
 | Command | Access | Description |
 |---|---|---|
-| `!addword <word>` | mod | Track `<word>` as a banned word. |
+| `!addword <word>` | mod | Track `<word>` for word-count stats (e.g. `!countword`) — not a ban/timeout list. |
 | `!remword <word>` | mod | Stop tracking `<word>`. |
 | `!update7tv` | mod | Re-fetch the channel's configured 7TV emote set (`sevenTv.emoteSetUrl` in channel config) and sync it into the whitelist used for `!topsmiles` tracking — adds new emotes, removes ones no longer in the set. Manually-tracked words (`!addword`) are unaffected. |
 
