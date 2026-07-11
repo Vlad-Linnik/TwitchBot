@@ -1,3 +1,4 @@
+require("./shared/logger.js");
 const botInitInfo = require("./botInitInfo.js");
 const tmi = require("tmi.js");
 const msgHandle = require("./commands/msgHandle.js");
@@ -111,7 +112,7 @@ async function start() {
     // Seed the in-memory moderator cache from the DB before anything else for this channel
     // starts, so EventManager/ActivityTracker never read an empty cache while it loads.
     await moderators.loadFromDatabase(botInitInfo.channels[channel].id);
-    TwitchEvent = new EventManager(`${botInitInfo.channels[channel].id}`);
+    TwitchEvent = new EventManager(`${botInitInfo.channels[channel].id}`, channel);
     TwitchEvent.connect();
     ModsActivitiTracker = new ActivityTracker(botInitInfo.channels[channel].id, channel);
     ModsActivitiTracker.start();

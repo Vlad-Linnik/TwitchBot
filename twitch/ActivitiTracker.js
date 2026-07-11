@@ -98,7 +98,7 @@ class ModActivityTracker {
 
             if (!liveResult) {
                 if (this.isLive) {
-                    console.log('[ModTracker] Stream is offline');
+                    console.log(`[ModTracker] [${this.channelLogin}] Stream is offline`);
                     this.isLive = false;
                     this.recordDailyModeratorStats(currentModerators);
                 }
@@ -108,9 +108,11 @@ class ModActivityTracker {
             }
 
             const wasLiveWithBaseline = this.isLive && this.lastCheckTime !== null;
+            if (!this.isLive) {
+                console.log(`[ModTracker] [${this.channelLogin}] Stream started`);
+            }
             this.isLive = true;
 
-            console.log('[ModTracker] Scanning ...');
             const currentChatters = await this.getAllChatters();
 
             // Use real elapsed time since the last successful check when we have a baseline,
@@ -153,7 +155,7 @@ class ModActivityTracker {
     async start() {
         await this.checkActivity();
         this.timer = setInterval(() => this.checkActivity(), this.intervalMs);
-        console.log(`[ModTracker] ${this.broadcasterId} running... Interval = ${this.intervalMs / 1000} seconds.`);
+        console.log(`[ModTracker] [${this.channelLogin}] running... Interval = ${this.intervalMs / 1000} seconds.`);
     }
 
     stop() {
