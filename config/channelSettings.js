@@ -1,11 +1,56 @@
 const fs = require('fs');
 const path = require('path');
+const { connect } = require('../db/db.js');
 
 const CHANNELS_DIR = path.join(__dirname, 'channels');
-const DEFAULT_FILE = path.join(CHANNELS_DIR, 'default.json');
+const CACHE_TTL_MS = 5000;
 
+// Baseline command signatures/cooldowns/responses every channel's settings are deep-merged
+// over. This used to live in config/channels/default.json - moved inline since it's
+// schema/baseline code, not per-channel data (kept in sync by hand with TwitchBot-Web's
+// config/defaultChannelConfig.json, same as before).
+const DEFAULT_CHANNEL_SETTINGS = {
+  bannedWords: {
+    words: ["example_curse_word"],
+    timeoutReason: "",
+  },
+  spamSignatures: ["example_spam_signature"],
+  sevenTv: {
+    emoteSetUrl: "",
+  },
+  commands: {
+    topchatters: { enabled: true, cooldownMs: 15000, signature: "!topchatters" },
+    topsmiles: { enabled: true, cooldownMs: 15000, signature: "!topsmiles" },
+    countword: { enabled: true, cooldownMs: 15000, signature: "!countword" },
+    countmsg: { enabled: true, cooldownMs: 15000, signature: "!countmsg" },
+    countunique: { enabled: true, cooldownMs: 15000, signature: "!countunique" },
+    botinfo: { enabled: true, signature: "!botinfo" },
+    addword: { enabled: true, signature: "!addword", remSignature: "!remword" },
+    addcommand: { enabled: true, signature: "!addcommand" },
+    settimer: { enabled: true, signature: "!settimer" },
+    setpin: { enabled: true, signature: "!setpin" },
+    exception: { enabled: true, signature: "!addexception", remSignature: "!remexception" },
+    update7tv: { enabled: true, cooldownMs: 30000, signature: "!update7tv" },
+    muteduel: { enabled: true, cooldownMs: 50000, signature: "!muteduel", acceptSignature: "!muteaccept" },
+    question: { enabled: true, cooldownMs: 30000 },
+    directmsg: { enabled: true, cooldownMs: 15000 },
+    insult: { enabled: true, cumulativeDelayMs: 150000 },
+    customCommandTimer: { minMessagesBetween: 10 },
+    counterUpdate: { cooldownMs: 10000 },
+  },
+  responses: {
+    busy: ["I am busy"],
+    yesNo: ["Да", "Нет", "Не могу сказать", "eeeh ", "Возможно", "50/50", "Скорее да, чем нет"],
+    insultModExempt: ["("],
+    insultBotNotMod: "(",
+  },
+};
+
+// login -> { settings, expiresAt }
 const settingsCache = new Map();
 const bannedWordsRegexCache = new Map();
+const refreshing = new Set();
+let channelConfigCollection;
 
 function normalizeChannel(channel) {
   return channel.toLowerCase().replace('#', '');
@@ -29,18 +74,68 @@ function loadJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-function getSettings(channel) {
+// Pure JSON-file view (default.json deep-merged with config/channels/<login>.json),
+// ignoring Mongo entirely. Used as the synchronous fallback when no ChannelConfig
+// doc is cached yet, and by scripts/migrateChannelConfigs.js which needs the raw
+// file contents regardless of what's already been migrated to Mongo.
+function getSettingsFromFiles(channel) {
   const login = normalizeChannel(channel);
-  if (settingsCache.has(login)) return settingsCache.get(login);
-
-  const defaults = loadJson(DEFAULT_FILE);
+  const defaults = DEFAULT_CHANNEL_SETTINGS;
   const channelFile = path.join(CHANNELS_DIR, `${login}.json`);
-  const settings = fs.existsSync(channelFile)
+  return fs.existsSync(channelFile)
     ? deepMerge(defaults, loadJson(channelFile))
     : defaults;
+}
 
-  settingsCache.set(login, settings);
-  return settings;
+async function ensureCollection() {
+  if (channelConfigCollection) return channelConfigCollection;
+  const db = await connect();
+  channelConfigCollection = db.collection('ChannelConfig');
+  return channelConfigCollection;
+}
+
+function setCache(login, settings, ttlMs = CACHE_TTL_MS) {
+  settingsCache.set(login, { settings, expiresAt: Date.now() + ttlMs });
+  bannedWordsRegexCache.delete(login);
+}
+
+// Fire-and-forget: refreshes the cache for `login` from the ChannelConfig collection
+// that TwitchBot-Web writes to, falling back to the JSON files if no doc exists yet
+// or Mongo is unreachable. Callers always read the (possibly briefly stale) cache
+// synchronously via getSettings() and never wait on this.
+async function refreshFromMongo(login) {
+  if (refreshing.has(login)) return;
+  refreshing.add(login);
+  try {
+    const col = await ensureCollection();
+    const doc = await col.findOne({ channelLogin: login });
+    const settings = doc
+      ? deepMerge(DEFAULT_CHANNEL_SETTINGS, doc)
+      : getSettingsFromFiles(login);
+    setCache(login, settings);
+  } catch (err) {
+    console.error(`[channelSettings] Mongo refresh failed for "${login}":`, err.message);
+    if (!settingsCache.has(login)) setCache(login, getSettingsFromFiles(login), 0);
+  } finally {
+    refreshing.delete(login);
+  }
+}
+
+function getSettings(channel) {
+  const login = normalizeChannel(channel);
+  const cached = settingsCache.get(login);
+
+  if (!cached) {
+    setCache(login, getSettingsFromFiles(login), 0);
+    refreshFromMongo(login);
+    return settingsCache.get(login).settings;
+  }
+
+  if (Date.now() >= cached.expiresAt) {
+    refreshFromMongo(login);
+  }
+
+  return cached.settings;
 }
 
 function escapeRegExp(word) {
@@ -81,6 +176,7 @@ function reload() {
 
 module.exports = {
   getSettings,
+  getSettingsFromFiles,
   getBannedWordsRegex,
   getCommandSignatureRegex,
   getCommandSignatureArgRegex,
