@@ -1,8 +1,5 @@
-const fs = require('fs');
-const path = require('path');
 const { connect } = require('../db/db.js');
 
-const CHANNELS_DIR = path.join(__dirname, 'channels');
 const CACHE_TTL_MS = 5000;
 
 // Baseline command signatures/cooldowns/responses every channel's settings are deep-merged
@@ -70,23 +67,6 @@ function deepMerge(base, override) {
   return result;
 }
 
-function loadJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-// Pure JSON-file view (default.json deep-merged with config/channels/<login>.json),
-// ignoring Mongo entirely. Used as the synchronous fallback when no ChannelConfig
-// doc is cached yet, and by scripts/migrateChannelConfigs.js which needs the raw
-// file contents regardless of what's already been migrated to Mongo.
-function getSettingsFromFiles(channel) {
-  const login = normalizeChannel(channel);
-  const defaults = DEFAULT_CHANNEL_SETTINGS;
-  const channelFile = path.join(CHANNELS_DIR, `${login}.json`);
-  return fs.existsSync(channelFile)
-    ? deepMerge(defaults, loadJson(channelFile))
-    : defaults;
-}
-
 async function ensureCollection() {
   if (channelConfigCollection) return channelConfigCollection;
   const db = await connect();
@@ -100,22 +80,21 @@ function setCache(login, settings, ttlMs = CACHE_TTL_MS) {
 }
 
 // Fire-and-forget: refreshes the cache for `login` from the ChannelConfig collection
-// that TwitchBot-Web writes to, falling back to the JSON files if no doc exists yet
-// or Mongo is unreachable. Callers always read the (possibly briefly stale) cache
-// synchronously via getSettings() and never wait on this.
+// that TwitchBot-Web writes to, falling back to bare DEFAULT_CHANNEL_SETTINGS if no doc
+// exists yet or Mongo is unreachable (there's no more per-channel JSON file fallback -
+// all channels are expected to have a ChannelConfig doc). Callers always read the
+// (possibly briefly stale) cache synchronously via getSettings() and never wait on this.
 async function refreshFromMongo(login) {
   if (refreshing.has(login)) return;
   refreshing.add(login);
   try {
     const col = await ensureCollection();
     const doc = await col.findOne({ channelLogin: login });
-    const settings = doc
-      ? deepMerge(DEFAULT_CHANNEL_SETTINGS, doc)
-      : getSettingsFromFiles(login);
+    const settings = doc ? deepMerge(DEFAULT_CHANNEL_SETTINGS, doc) : DEFAULT_CHANNEL_SETTINGS;
     setCache(login, settings);
   } catch (err) {
     console.error(`[channelSettings] Mongo refresh failed for "${login}":`, err.message);
-    if (!settingsCache.has(login)) setCache(login, getSettingsFromFiles(login), 0);
+    if (!settingsCache.has(login)) setCache(login, DEFAULT_CHANNEL_SETTINGS, 0);
   } finally {
     refreshing.delete(login);
   }
@@ -126,7 +105,7 @@ function getSettings(channel) {
   const cached = settingsCache.get(login);
 
   if (!cached) {
-    setCache(login, getSettingsFromFiles(login), 0);
+    setCache(login, DEFAULT_CHANNEL_SETTINGS, 0);
     refreshFromMongo(login);
     return settingsCache.get(login).settings;
   }
@@ -176,7 +155,6 @@ function reload() {
 
 module.exports = {
   getSettings,
-  getSettingsFromFiles,
   getBannedWordsRegex,
   getCommandSignatureRegex,
   getCommandSignatureArgRegex,

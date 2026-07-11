@@ -132,4 +132,7 @@ async function bootstrap() {
   await start();
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  console.error('[index] Fatal startup error:', err.message);
+  process.exit(1);
+});
