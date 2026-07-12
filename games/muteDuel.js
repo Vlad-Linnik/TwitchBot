@@ -1,6 +1,7 @@
 // Import required modules and dependencies
 const { isTimerReady } = require("../shared/timer.js");
 const { isMod } = require("../shared/isMod.js");
+const { replyIfBotLacksMod } = require("../shared/botPermission.js");
 const TwitchBanAPI = require("../twitch/TwitchBanAPI.js");
 const botInitInfo = require("../botInitInfo.js");
 const channelSettings = require("../config/channelSettings.js");
@@ -74,7 +75,7 @@ function muteDuel(client, channel, userState, message) {
   let timeout = MINIMUM_DUEL_TIMEOUT;
   if (match) {
     if (duelDelayCheck(channel, userState, settings.commands.muteduel.cooldownMs)) return 1;
-    if (!client.isMod(channel, `#${botInitInfo.settings.username}`)) return 1;
+    if (replyIfBotLacksMod(client, channel, userState, settings)) return 1;
     if (message.toLowerCase().match(/(@\w+)/)) {
       name = message
         .toLowerCase()

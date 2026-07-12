@@ -1,5 +1,6 @@
 const { isInsult } = require("../games/isInsult.js");
 const { isMod } = require("../shared/isMod.js");
+const { replyIfBotLacksMod } = require("../shared/botPermission.js");
 const {
   mcopDuelExecute,
 } = require("../games/duelFromMrCopusBot.js");
@@ -54,9 +55,10 @@ async function spam_protection(client, channel, userState, message) {
   if (isMod(userState)) {
     return 0;
   }
-  const spamSignatures = channelSettings.getSettings(channel).spamSignatures;
-  for (const signature of spamSignatures) {
+  const settings = channelSettings.getSettings(channel);
+  for (const signature of settings.spamSignatures) {
     if (Normalization.detectObfuscatedSignature(message, signature)) {
+      if (replyIfBotLacksMod(client, channel, userState, settings)) return 1;
       Twitch_ban_API.ban(userState["user-id"], userState["room-id"], "spam bot");
       return 1;
     }
@@ -268,11 +270,13 @@ async function execCommands(client, channel, userState, message) {
   ]
   for (const cmd of asyncCommandsCheck) {
     if ( await cmd(client, channel, userState, message)) {
+      ChatStats.incrementCommandCount(channel);
       return 1;
     }
   }
   for (const cmd of commandCheck) {
     if (cmd(client, channel, userState, message)) {
+      ChatStats.incrementCommandCount(channel);
       return 1;
     }
   }
