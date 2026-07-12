@@ -11,3 +11,4 @@ config/channels/*.json
 !config/channels/default.json
 CLAUDE.md
 .gitignore
+graphify-out/

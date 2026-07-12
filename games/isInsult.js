@@ -1,5 +1,6 @@
 const Twitch_ban_API = require("../twitch/TwitchBanAPI.js");
 const { isMod } = require("../shared/isMod.js");
+const { replyIfBotLacksMod } = require("../shared/botPermission.js");
 const { isTimerReady } = require("../shared/timer.js");
 const botInitInfo = require("../botInitInfo.js");
 const channelSettings = require("../config/channelSettings.js");
@@ -19,11 +20,7 @@ function isInsult(client, channel, userState, message) {
   const bannedWordsRegex = channelSettings.getBannedWordsRegex(channel);
   var res = bannedWordsRegex && message.match(bannedWordsRegex);
   if (Boolean(res)) {
-    // if bot not a moderator
-    if (!client.isMod(channel, "#" + botInitInfo.settings["username"])) {
-      client.say(channel, settings.responses.insultBotNotMod, userState["id"]);
-      return 1;
-    }
+    if (replyIfBotLacksMod(client, channel, userState, settings)) return 1;
     // answer to mods
     if (isMod(userState)) {
       client.say(channel, settings.responses.insultModExempt.random(), userState["id"]);

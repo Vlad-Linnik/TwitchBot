@@ -39,7 +39,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
     busy: ["I am busy"],
     yesNo: ["Да", "Нет", "Не могу сказать", "eeeh ", "Возможно", "50/50", "Скорее да, чем нет"],
     insultModExempt: ["("],
-    insultBotNotMod: "(",
+    insufficientPermissions: "У меня нет прав модератора для этого действия.",
   },
 };
 

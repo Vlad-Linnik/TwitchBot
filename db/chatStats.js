@@ -61,6 +61,8 @@ class ChatStats {
     this.userLifetimeStats = null;
     this.userIdentities = null;
     this.wordLifetimeStats = null;
+    this.commandStats = null;
+    this.globalEmoteStats = null;
   }
 
   async initialize() {
@@ -79,7 +81,10 @@ class ChatStats {
       this.userLifetimeStats = db.collection("UserLifetimeStats");
       this.userIdentities = db.collection("UserIdentities");
       this.wordLifetimeStats = db.collection("WordLifetimeStats");
+      this.commandStats = db.collection("CommandExecutionStats");
+      this.globalEmoteStats = db.collection("GlobalEmoteStats");
 
+      await this.commandStats.createIndex({ channel: 1 }, { unique: true });
       await this.modsUpTimeStats.createIndex({ channelId: 1, userId: 1, timestamp: 1 }, { unique: true });
       await this.modsUpTimeStats.createIndex({ channelId: 1, timestamp: 1, hours: -1 });
       await this.modStats.createIndex({ channelId: 1, userId: 1, date: 1 }, { unique: true });
@@ -297,6 +302,18 @@ class ChatStats {
       .catch(err => console.error('[DB] modLogs insert error:', err));
   }
 
+  // Fire-and-forget counter for "commands executed" site-wide stats (TwitchBot-Web
+  // home page) - incremented once per message any handler in execCommands() resolves
+  // (built-ins, custom commands, and mini-games alike), so it must never block chat handling.
+  async incrementCommandCount(channel) {
+    await this.ensureInitialized();
+    this.commandStats.updateOne(
+      { channel },
+      { $inc: { count: 1 }, $set: { lastUsed: new Date() } },
+      { upsert: true }
+    ).catch(err => console.error('[DB] incrementCommandCount error:', err));
+  }
+
   async isCommandExist(channel, command) {
     await this.ensureInitialized();
     return !! await this.customCommandsCollection.findOne( {channel:channel, command:command} );
@@ -505,7 +522,19 @@ class ChatStats {
           upsert: true
         }
       }));
-      this.wordLifetimeStats.bulkWrite(lifetimeOperations, { ordered: false }).catch(err => {
+      this.wordLifetimeStats.bulkWrite(lifetimeOperations, { ordered: false }).then(result => {
+        // Site-wide running total (TwitchBot-Web home page) - upsertedCount is how many
+        // of these {channel, word} pairs were brand new, so the same emote signature
+        // added in two different channels correctly counts as two separate entries.
+        this.globalEmoteStats.updateOne(
+          { _id: 'global' },
+          {
+            $inc: { totalUsageCount: allowedWords.length, totalEntriesAdded: result.upsertedCount || 0 },
+            $set: { updatedAt: new Date() }
+          },
+          { upsert: true }
+        ).catch(err => console.error('[DB] globalEmoteStats update error:', err));
+      }).catch(err => {
         console.error('[DB] wordLifetimeStats bulk write error:', err);
       });
     }
