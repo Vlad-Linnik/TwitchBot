@@ -12,6 +12,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
     timeoutReason: "",
   },
   spamSignatures: ["example_spam_signature"],
+  spamBanReason: "spam bot",
   sevenTv: {
     emoteSetUrl: "",
   },

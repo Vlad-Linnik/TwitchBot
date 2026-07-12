@@ -59,7 +59,7 @@ async function spam_protection(client, channel, userState, message) {
   for (const signature of settings.spamSignatures) {
     if (Normalization.detectObfuscatedSignature(message, signature)) {
       if (replyIfBotLacksMod(client, channel, userState, settings)) return 1;
-      Twitch_ban_API.ban(userState["user-id"], userState["room-id"], "spam bot");
+      Twitch_ban_API.ban(userState["user-id"], userState["room-id"], settings.spamBanReason || "spam bot");
       return 1;
     }
   }
