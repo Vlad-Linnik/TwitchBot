@@ -190,6 +190,11 @@ class Counter {
 }
 
 class CustomCommands {
+    // How often the bot re-reads `custom_commands` to pick up edits made on the website. Short
+    // enough that an edit on the panel feels live (same spirit as channelSettings' 5s TTL), long
+    // enough to be a rounding error against chat volume: one indexed find per channel per tick.
+    static REFRESH_INTERVAL_MS = 10 * 1000;
+
     constructor(counter) {
       // Timer
       this.customCommandsTimer = 10 * 1000; // 10 sec
@@ -214,6 +219,9 @@ class CustomCommands {
       // how often a gated auto-send (offline stream / chat too quiet) re-checks,
       // instead of waiting out a full command timer period
       this.autoSendRetryMs = 30 * 1000;
+      // Handle for the periodic re-read that picks up edits made on the website (see
+      // refreshFromDatabase). Armed by startCommandTimers(), which index.js calls once at startup.
+      this.refreshInterval = null;
       this.updateCustomCommands();
     }
     
@@ -223,6 +231,65 @@ class CustomCommands {
         this.CommandsDict[ch] = await ChatStats.getAllCommands(ch);
         this.CommandsKeysList[ch] = Object.keys(this.CommandsDict[ch]).sort((a,b) => b.length - a.length);
       }
+    }
+
+    // Only the parts of a command that affect the AUTO-SEND SCHEDULE. Used to decide whether a
+    // refresh has to rebuild the timers, because rebuilding is not free: scheduleChannelCommands()
+    // re-staggers the whole channel, so doing it on every poll would keep resetting the phase of
+    // commands whose timers never changed, and they'd drift instead of firing on their period.
+    // Command TEXT can change freely without any of that.
+    timerSignature = (commands) =>
+      Object.keys(commands)
+        .sort()
+        .map((name) => `${name}:${commands[name].timer ?? ''}:${commands[name].pin ? 1 : 0}`)
+        .join('|');
+
+    // Picks up edits made OUTSIDE this process - i.e. on the TwitchBot-Web control panel, which
+    // writes the same `custom_commands` collection.
+    //
+    // Why a poll and not the lazy TTL that config/channelSettings.js uses: that pattern refreshes
+    // on READ, which is fine for settings (every message reads them) but not for commands. A
+    // command added on the website with a timer has to start auto-sending even if nobody ever
+    // types anything in chat - and with a read-triggered refresh there'd be no read to trigger it.
+    // So this is a small periodic re-read (one indexed find per channel), and it costs nothing
+    // when nothing changed.
+    refreshFromDatabase = async () =>
+    {
+      for (const ch of this.channelsList) {
+        try {
+          const fresh = await ChatStats.getAllCommands(ch);
+          const before = this.timerSignature(this.CommandsDict[ch] || {});
+          const after = this.timerSignature(fresh);
+
+          this.CommandsDict[ch] = fresh;
+          this.CommandsKeysList[ch] = Object.keys(fresh).sort((a, b) => b.length - a.length);
+
+          if (before !== after) {
+            this.scheduleChannelCommands(ch);
+            console.log(`[CustomCommands] ${ch}: timer schedule changed externally, rebuilt`);
+          }
+        } catch (err) {
+          // Never let a failed refresh kill the interval - the cache just stays as it was.
+          console.error(`[CustomCommands] refresh failed for ${ch}:`, err.message);
+        }
+      }
+    }
+
+    startAutoRefresh = () =>
+    {
+      if (this.refreshInterval) return;
+      this.refreshInterval = setInterval(
+        () => this.refreshFromDatabase().catch((err) => console.error('[CustomCommands] refresh error:', err)),
+        CustomCommands.REFRESH_INTERVAL_MS
+      );
+      // Don't hold the event loop open - standalone scripts that require this module must exit.
+      this.refreshInterval.unref?.();
+    }
+
+    stopAutoRefresh = () =>
+    {
+      if (this.refreshInterval) clearInterval(this.refreshInterval);
+      this.refreshInterval = null;
     }
 
     addCommand = async(client, channel, userState, message) =>
@@ -504,6 +571,9 @@ class CustomCommands {
     for (const ch of this.channelsList) {
       this.scheduleChannelCommands(ch);
     }
+    // Commands can also be created/edited/deleted on the TwitchBot-Web panel, which writes the
+    // same collection. Without this, those edits would only reach the running bot on a restart.
+    this.startAutoRefresh();
   }
 
   stopCommandTimers = () =>
@@ -514,6 +584,7 @@ class CustomCommands {
       }
     }
     this.commandTimers = {};
+    this.stopAutoRefresh();
   }
 
   getAllCustomCommands = async (client, channel, userState, message) =>

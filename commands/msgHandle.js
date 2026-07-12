@@ -76,7 +76,7 @@ function directMsgCheck(client, channel, userState, message) {
     return 0;
   }
 
-  if (message.match(/@chatwizardbot/)) {
+  if (message.toLowerCase().includes(`@${botInitInfo.settings["username"].toLowerCase()}`)) {
     const checks = [mcopDuelExecute, isInsult, question];
     for (const check of checks) {
       if (check(client, channel, userState, message)) {

@@ -1,4 +1,5 @@
 const { connect } = require('./db.js');
+const { extractWords, extractMentions, dayBucket, LIFETIME_BUCKET } = require('../shared/textStats.js');
 
 const MIN_TIMEOUT_MS = 1000; // 1 second, Twitch's shortest timeout
 const MAX_TIMEOUT_MS = 1_209_600_000; // 1,209,600s = 2 weeks, Twitch's longest timeout
@@ -46,6 +47,15 @@ function splitIntoDaySegments(start, end) {
   return segments;
 }
 
+// Separator packing {channel, word, day} into a single in-memory buffer key. NUL is used
+// because it is the one character a channel name, a tokenized word and a numeric day bucket
+// can never themselves contain - so the key is always unambiguous to split back apart.
+const KEY_SEP = '\u0000';
+
+// How long chat-word / @mention counts accumulate in memory before being flushed to Mongo as
+// one coalesced bulkWrite. See ChatStats.bufferTextStats() for why this buffer exists.
+const TEXT_STATS_FLUSH_INTERVAL_MS = 5000;
+
 class ChatStats {
   constructor() {
     this.dbInitialized = false;
@@ -63,6 +73,21 @@ class ChatStats {
     this.wordLifetimeStats = null;
     this.commandStats = null;
     this.globalEmoteStats = null;
+    this.chatWordStats = null;
+    this.userMentionStats = null;
+    this.wordBuffer = new Map();
+    this.mentionBuffer = new Map();
+    this.textStatsFlushTimer = null;
+    // Deliberately NOT the same thing as whiteListCache, even though they overlap:
+    //   whiteListCache        - what currently COUNTS as a tracked emote (gates `words` /
+    //                           WordLifetimeStats). Case-sensitive, because 7TV emotes are.
+    //   emoteExclusionCache   - what is barred from the WORD cloud. The union of currently and
+    //                           historically tracked emotes, lowercased.
+    // They must differ, because a channel can stop tracking emotes while its chat keeps using
+    // them: #mistercop has an empty whiteList but 488 emotes in WordLifetimeStats, so gating the
+    // word cloud on whiteListCache alone let `jokerge`, `arolf` and `wideNessie` - emotes, with
+    // tens of thousands of uses each - straight into its word cloud as if they were words.
+    this.emoteExclusionCache = new Map();
   }
 
   async initialize() {
@@ -83,6 +108,15 @@ class ChatStats {
       this.wordLifetimeStats = db.collection("WordLifetimeStats");
       this.commandStats = db.collection("CommandExecutionStats");
       this.globalEmoteStats = db.collection("GlobalEmoteStats");
+      // NOTE the naming: `words`/`WordLifetimeStats` above are, despite their names, EMOTE
+      // stats - addMessage() only counts tokens present in the channel's whiteList, which is
+      // synced from its 7TV emote set. They are not a word-frequency index (as of this writing
+      // WordLifetimeStats holds ~500 distinct entries against ~1.9M messages). ChatWordStats
+      // below is the actual word-frequency index: every non-emote, non-stopword, non-command
+      // token. The two are deliberately disjoint so the web panel's Word Cloud and Emote Cloud
+      // show genuinely different things.
+      this.chatWordStats = db.collection("ChatWordStats");
+      this.userMentionStats = db.collection("UserMentionStats");
 
       await this.commandStats.createIndex({ channel: 1 }, { unique: true });
       await this.modsUpTimeStats.createIndex({ channelId: 1, userId: 1, timestamp: 1 }, { unique: true });
@@ -91,6 +125,13 @@ class ChatStats {
       await this.modList.createIndex({ channelId: 1 }, { unique: true });
       await this.modLogs.createIndex({ channel: 1, timestamp: -1, userId: 1 });
       await this.messagesCollection.createIndex({ channel: 1, timestamp: -1, userId: 1 });
+      // Every per-user page on the web panel (message-count chart, activity heatmap, that
+      // user's word/emote cloud, the moderator-only log view) filters by {channel, userId}
+      // then ranges over time. The index above leads with timestamp, so those queries would
+      // scan the channel's whole time range and post-filter on userId; this one puts userId
+      // in the prefix so a single user's history is a tight, bounded index range. It also
+      // serves the multi-user log search ($in on userId).
+      await this.messagesCollection.createIndex({ channel: 1, userId: 1, timestamp: -1 });
       await this.wordsCollection.createIndex({ channel: 1, date: -1 });
       await this.userLifetimeStats.createIndex({ channel: 1, userId: 1 }, { unique: true });
       await this.userLifetimeStats.createIndex({ channel: 1, messageCount: -1 });
@@ -99,12 +140,47 @@ class ChatStats {
       await this.wordLifetimeStats.createIndex({ channel: 1, count: -1 });
       await this.whiteListCollection.createIndex({ channel: 1, word: 1 }, { unique: true });
       await this.customCommandExceptions.createIndex({ channel: 1 }, { unique: true });
+
+      // Both new collections carry their daily rows AND an all-time row in the same place,
+      // the all-time one keyed by the epoch sentinel date (textStats.LIFETIME_BUCKET) - the
+      // same trick ModUpTimeStats uses. Two consequences worth knowing:
+      //   - "top N of all time" is an O(limit) index scan on {channel, date, count} rather
+      //     than a $group across every day ever recorded. That's what makes the channel word
+      //     cloud affordable on a 2GB box.
+      //   - any real date range starts after the epoch, so range queries skip the all-time
+      //     row automatically without needing to exclude it.
+      await this.chatWordStats.createIndex({ channel: 1, word: 1, date: 1 }, { unique: true });
+      await this.userMentionStats.createIndex({ channel: 1, mentionedLogin: 1, date: 1 }, { unique: true });
+
+      // COVERING indexes for the two read patterns, and the word/login field is in them on
+      // purpose. ChatWordStats runs to ~1 row per message (~1.9M for #mistercop), so a read
+      // that has to FETCH the documents to learn each row's `word` would pull hundreds of
+      // thousands of docs through a 2GB box's cache. With the term in the index, both the
+      // all-time top-N (date = epoch, sorted by count) and the date-range $group are answered
+      // entirely from the index - zero document fetches. This is the single most important
+      // thing making the channel word cloud affordable on that VPS.
+      await this.chatWordStats.createIndex({ channel: 1, date: 1, count: -1, word: 1 });
+      await this.userMentionStats.createIndex({ channel: 1, date: 1, count: -1, mentionedLogin: 1 });
       const list = await this.whiteListCollection.find({}).toArray();
       this.whiteListCache = new Map();
       for (const item of list) {
         if (!this.whiteListCache.has(item.channel)) this.whiteListCache.set(item.channel, new Set());
         this.whiteListCache.get(item.channel).add(item.word);
       }
+
+      // Word-cloud exclusion set: every emote this channel tracks now (whiteList) OR ever tracked
+      // (WordLifetimeStats). Lowercased, because `AROLF` the emote and `arolf` as typed are the
+      // same token to a reader even though Twitch treats them as distinct. A few hundred entries
+      // per channel - negligible memory, and it is what keeps the word cloud full of words.
+      this.emoteExclusionCache = new Map();
+      const addExclusion = (channel, word) => {
+        if (!this.emoteExclusionCache.has(channel)) this.emoteExclusionCache.set(channel, new Set());
+        this.emoteExclusionCache.get(channel).add(String(word).toLowerCase());
+      };
+      for (const item of list) addExclusion(item.channel, item.word);
+      const historical = await this.wordLifetimeStats.find({}, { projection: { channel: 1, word: 1 } }).toArray();
+      for (const item of historical) addExclusion(item.channel, item.word);
+
       this.dbInitialized = true;
       console.log('DB collections initialized');
     } catch (err) {
@@ -227,6 +303,100 @@ class ChatStats {
     } catch (err) {
       console.error('[DB] recordDailyModeratorStats error:', err);
     }
+  }
+
+  // --- Chat word / @mention stats -------------------------------------------------------
+  //
+  // Writes are COALESCED rather than issued per message. Done naively, one message would fan
+  // out into up to (30 words + 5 mentions) x 2 rows (daily + all-time) = ~70 upserts; on a busy
+  // channel that is hundreds of upserts a second against a 2GB VPS, for data nobody reads in
+  // real time. Instead each message just increments counters in an in-memory Map, and a timer
+  // flushes the aggregate every TEXT_STATS_FLUSH_INTERVAL_MS. Repeats of the same word inside
+  // the window collapse into a single $inc, which is where most of the saving comes from.
+  //
+  // Consequence, and it's the right trade for stats: up to one flush interval of counts is lost
+  // if the process dies, and a failed flush drops that batch. Both are consistent with the
+  // fire-and-forget, never-block-chat convention used by every other counter in this file.
+  // Barred from the word cloud: anything this channel tracks or has ever tracked as an emote.
+  // Broader than isInWhiteList() on purpose - see emoteExclusionCache in the constructor.
+  isTrackedEmote(channel, token) {
+    return this.emoteExclusionCache.get(channel)?.has(String(token).toLowerCase()) ?? false;
+  }
+
+  bufferTextStats(userName, message, channel, timestamp) {
+    const words = extractWords(message, (word) => this.isTrackedEmote(channel, word));
+    const mentions = extractMentions(message, [userName]);
+    if (words.length === 0 && mentions.length === 0) return;
+
+    const day = dayBucket(timestamp).getTime();
+    for (const word of words) {
+      const key = `${channel}${KEY_SEP}${word}${KEY_SEP}${day}`;
+      this.wordBuffer.set(key, (this.wordBuffer.get(key) || 0) + 1);
+    }
+    for (const login of mentions) {
+      const key = `${channel}${KEY_SEP}${login}${KEY_SEP}${day}`;
+      this.mentionBuffer.set(key, (this.mentionBuffer.get(key) || 0) + 1);
+    }
+
+    this.scheduleTextStatsFlush();
+  }
+
+  scheduleTextStatsFlush() {
+    if (this.textStatsFlushTimer) return;
+    this.textStatsFlushTimer = setTimeout(() => {
+      this.textStatsFlushTimer = null;
+      this.flushTextStats().catch((err) => console.error('[DB] flushTextStats error:', err));
+    }, TEXT_STATS_FLUSH_INTERVAL_MS);
+    // Don't let a pending stats flush hold the event loop open - one-off scripts that require
+    // this module (scripts/AddModerators.js, the backfill) must still be able to exit.
+    this.textStatsFlushTimer.unref?.();
+  }
+
+  // Swap-then-write: the buffers are emptied before the await so counts arriving during the
+  // flush accumulate into the next batch instead of being double-counted or lost.
+  async flushTextStats() {
+    if (this.wordBuffer.size === 0 && this.mentionBuffer.size === 0) return;
+
+    const words = this.wordBuffer;
+    const mentions = this.mentionBuffer;
+    this.wordBuffer = new Map();
+    this.mentionBuffer = new Map();
+
+    await this.ensureInitialized();
+
+    const buildOps = (buffer, field) => {
+      const ops = [];
+      for (const [key, count] of buffer) {
+        const [channel, value, day] = key.split(KEY_SEP);
+        const date = new Date(Number(day));
+        // The daily row and the all-time row differ only by their `date`; the all-time one uses
+        // the epoch sentinel so "top N ever" stays a single indexed scan (see initialize()).
+        for (const bucket of [date, LIFETIME_BUCKET]) {
+          ops.push({
+            updateOne: {
+              filter: { channel, [field]: value, date: bucket },
+              update: { $inc: { count }, $set: { lastUsed: new Date() } },
+              upsert: true,
+            },
+          });
+        }
+      }
+      return ops;
+    };
+
+    const wordOps = buildOps(words, 'word');
+    const mentionOps = buildOps(mentions, 'mentionedLogin');
+
+    await Promise.all([
+      wordOps.length
+        ? this.chatWordStats.bulkWrite(wordOps, { ordered: false })
+            .catch((err) => console.error('[DB] chatWordStats bulk write error:', err))
+        : null,
+      mentionOps.length
+        ? this.userMentionStats.bulkWrite(mentionOps, { ordered: false })
+            .catch((err) => console.error('[DB] userMentionStats bulk write error:', err))
+        : null,
+    ]);
   }
 
   async getModeratorsList(channelId) {
@@ -410,6 +580,15 @@ class ChatStats {
     );
     if (!this.whiteListCache.has(channel)) this.whiteListCache.set(channel, new Set());
     this.whiteListCache.get(channel).add(word);
+    this.rememberEmote(channel, word);
+  }
+
+  // Exclusion is append-only: removeFromWhiteList / a 7TV set that drops an emote stops it being
+  // COUNTED, but it must stay barred from the word cloud, because the chat still uses it and its
+  // historical counts still exist. Un-excluding it would let it resurface as a fake "word".
+  rememberEmote(channel, word) {
+    if (!this.emoteExclusionCache.has(channel)) this.emoteExclusionCache.set(channel, new Set());
+    this.emoteExclusionCache.get(channel).add(String(word).toLowerCase());
   }
 
   async removeFromWhiteList(channel, word) {
@@ -422,24 +601,37 @@ class ChatStats {
     return this.whiteListCache.get(channel)?.has(word) ?? false;
   }
 
-  // Adds/updates the channel's 7TV-sourced whitelist entries to exactly match `words`,
-  // without touching words added manually via !addword (source: 'manual').
-  async syncSevenTvEmoteSet(channel, setId, words) {
+  // Makes `channel`'s whitelist entries FOR ONE SOURCE exactly match `words`: upserts the current
+  // ones, drops the ones that source no longer lists, and leaves every other source alone.
+  //
+  // `source` is the isolation boundary, and that is the whole point of this being generic. The
+  // whitelist holds three independent populations:
+  //   'manual'        - added by a mod with !addword. Never touched by any sync.
+  //   '7tv'           - the channel's own 7TV emote set.
+  //   'twitch-global' - Twitch's official global emotes (Kappa, LUL, ...), the same for every
+  //                     channel, so they're written per-channel but fetched once.
+  // A sync of one must never delete another's rows, which is why the stale-delete below is
+  // scoped by `source` and not just by `channel`.
+  //
+  // Collisions: the unique index is {channel, word}, so if two sources ship the same name, the
+  // LAST sync to run owns the row. index.js syncs globals before 7TV precisely so the channel's
+  // own 7TV set wins - a channel-specific emote is the more meaningful attribution.
+  async syncEmoteSource(channel, source, words, extraFields = {}) {
     await this.ensureInitialized();
     const wordSet = new Set(words);
 
-    const existing7tv = await this.whiteListCollection.find({ channel, source: '7tv' }).toArray();
-    const staleWords = existing7tv.filter(item => !wordSet.has(item.word)).map(item => item.word);
+    const existing = await this.whiteListCollection.find({ channel, source }).toArray();
+    const staleWords = existing.filter(item => !wordSet.has(item.word)).map(item => item.word);
 
     if (staleWords.length > 0) {
-      await this.whiteListCollection.deleteMany({ channel, source: '7tv', word: { $in: staleWords } });
+      await this.whiteListCollection.deleteMany({ channel, source, word: { $in: staleWords } });
     }
 
     if (words.length > 0) {
       await this.whiteListCollection.bulkWrite(words.map(word => ({
         updateOne: {
           filter: { channel, word },
-          update: { $set: { channel, word, source: '7tv', setId } },
+          update: { $set: { channel, word, source, ...extraFields } },
           upsert: true
         }
       })));
@@ -449,6 +641,21 @@ class ChatStats {
     staleWords.forEach(word => cacheSet.delete(word));
     wordSet.forEach(word => cacheSet.add(word));
     this.whiteListCache.set(channel, cacheSet);
+    // staleWords are intentionally NOT un-excluded from the word cloud - see rememberEmote().
+    wordSet.forEach(word => this.rememberEmote(channel, word));
+
+    return { synced: words.length, removed: staleWords.length };
+  }
+
+  async syncSevenTvEmoteSet(channel, setId, words) {
+    return this.syncEmoteSource(channel, '7tv', words, { setId });
+  }
+
+  // Twitch's official global emotes. They are identical for every channel, so the caller fetches
+  // the list once (twitch/globalEmotes.js caches it) and calls this per channel - the counters in
+  // `words`/`WordLifetimeStats` are per-channel, so the rows have to be too.
+  async syncTwitchGlobalEmotes(channel, words) {
+    return this.syncEmoteSource(channel, 'twitch-global', words);
   }
 
   async recordUserIdentity(userId, userName, timestamp) {
@@ -489,6 +696,11 @@ class ChatStats {
 
     this.recordUserIdentity(userId, userName, timestamp)
       .catch(err => console.error('[DB] userIdentities update error:', err));
+
+    // Word-frequency + @mention counters for the web panel's clouds and mention tracker.
+    // Purely in-memory here (no await, no I/O) - the actual Mongo write is the coalesced
+    // flush a few seconds later, so this costs the chat path a tokenize and a few Map sets.
+    this.bufferTextStats(userName, message, channel, timestamp);
 
     // Twitch only ever renders emotes/smileys as their own whitespace-delimited
     // token anyway, so a plain split is enough - no regex needed.
