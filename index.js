@@ -18,6 +18,7 @@ async function bootstrap() {
   const moderators = require('./twitch/moderators.js');
   const { customCommands } = require('./commands/CustomCommands.js');
   const { syncChannelEmoteSet } = require('./sevenTv/SevenTvEmotes.js');
+  const { syncGlobalEmotes } = require('./twitch/globalEmotes.js');
 
   // bot settings
   const opts = {
@@ -99,8 +100,9 @@ async function bootstrap() {
         return;
       }
     }
+    
     // direct msg to this bot
-    if (message.match(/chatwizardbot/)) {
+    if (message.toLowerCase().includes(botInitInfo.settings["username"].toLowerCase())) {
       if (msgHandle.directMsgCheck(client, channel, userState, message)) {
         return;
       }
@@ -122,8 +124,14 @@ async function bootstrap() {
       TwitchEvent.connect();
       ModsActivitiTracker = new ActivityTracker(botInitInfo.channels[channel].id, channel);
       ModsActivitiTracker.start();
-      syncChannelEmoteSet(`#${channel}`)
-        .catch(err => console.error(`[7TV] Sync failed for #${channel}:`, err.message));
+      // Twitch's global emotes FIRST, then the channel's own 7TV set. The order matters: the
+      // whitelist's unique key is {channel, word}, so if a 7TV set aliases a global emote's name
+      // the later sync owns the row - and a channel-specific emote is the more meaningful
+      // attribution. Both are fire-and-forget: a failed emote sync must never stop the bot
+      // joining the channel, it just means that source isn't tracked until the next restart.
+      syncGlobalEmotes(`#${channel}`)
+        .then(() => syncChannelEmoteSet(`#${channel}`))
+        .catch(err => console.error(`[Emotes] Sync failed for #${channel}:`, err.message));
     }
     customCommands.startCommandTimers(client);
     client.connect();
