@@ -199,28 +199,6 @@ async function countUserMsg(client, channel, userState, message) {
   return 1;
 }
 
-async function addRemWordToWhiteList(client, channel, userState, message) {
-  const settings = channelSettings.getSettings(channel);
-  if (!settings.commands.addword.enabled) return 0;
-  const addSignature = channelSettings.escapeRegExp(settings.commands.addword.signature);
-  const remSignature = channelSettings.escapeRegExp(settings.commands.addword.remSignature);
-  if (!message.match(new RegExp(`^${addSignature}|^${remSignature}`))) {return 0;}
-  if(!isMod(userState)) {return 0;}
-  var cmdArgs = message.match(new RegExp(`${addSignature} (\\w+)|${remSignature} (\\w+)`));
-  if (!cmdArgs) {
-    client.say(channel, `ошибка VoHiYo `, userState["id"]);
-    return 1;
-  }
-  if(message.toLocaleLowerCase().match(new RegExp(addSignature.toLowerCase()))){
-    await ChatStats.addToWhiteList(channel, cmdArgs[1]);
-    client.say(channel, `слово "${cmdArgs[1]}" отслеживается ✅`, userState["id"]);
-    return 1;
-  }
-  await ChatStats.removeFromWhiteList(channel, cmdArgs[2]);
-  client.say(channel, `слово "${cmdArgs[2]}" НЕ отслеживается ✅`, userState["id"]);
-  return 1;
-}
-
 async function updateSevenTvEmotes(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.update7tv.enabled) return 0;
@@ -254,7 +232,7 @@ async function execCommands(client, channel, userState, message) {
   ];
   const asyncCommandsCheck = [
     customCommands.getAllCustomCommands,
-    get_bot_info, topChatters,topSmiles,countUserMsg,addRemWordToWhiteList,updateSevenTvEmotes,count_unique,countWord,
+    get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,
     customCommands.addCommand,
     customCommands.deleteCustomCommand,
     customCommands.setCommandTimer,

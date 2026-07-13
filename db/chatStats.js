@@ -571,30 +571,12 @@ class ChatStats {
     return count;
   }
 
-  async addToWhiteList(channel, word) {
-    await this.ensureInitialized();
-    await this.whiteListCollection.updateOne(
-      { channel, word },
-      { $set: { channel, word, source: 'manual' }, $unset: { setId: '' } },
-      { upsert: true }
-    );
-    if (!this.whiteListCache.has(channel)) this.whiteListCache.set(channel, new Set());
-    this.whiteListCache.get(channel).add(word);
-    this.rememberEmote(channel, word);
-  }
-
-  // Exclusion is append-only: removeFromWhiteList / a 7TV set that drops an emote stops it being
-  // COUNTED, but it must stay barred from the word cloud, because the chat still uses it and its
-  // historical counts still exist. Un-excluding it would let it resurface as a fake "word".
+  // Exclusion is append-only: a 7TV set that drops an emote stops it being COUNTED, but it must
+  // stay barred from the word cloud, because the chat still uses it and its historical counts
+  // still exist. Un-excluding it would let it resurface as a fake "word".
   rememberEmote(channel, word) {
     if (!this.emoteExclusionCache.has(channel)) this.emoteExclusionCache.set(channel, new Set());
     this.emoteExclusionCache.get(channel).add(String(word).toLowerCase());
-  }
-
-  async removeFromWhiteList(channel, word) {
-    await this.ensureInitialized();
-    await this.whiteListCollection.deleteOne({ channel, word });
-    this.whiteListCache.get(channel)?.delete(word);
   }
 
   isInWhiteList(channel, word) {
@@ -606,7 +588,8 @@ class ChatStats {
   //
   // `source` is the isolation boundary, and that is the whole point of this being generic. The
   // whitelist holds three independent populations:
-  //   'manual'        - added by a mod with !addword. Never touched by any sync.
+  //   'manual'        - added by a mod with the (since-removed) !addword command. The command is
+  //                     gone but its rows persist and must still never be touched by any sync.
   //   '7tv'           - the channel's own 7TV emote set.
   //   'twitch-global' - Twitch's official global emotes (Kappa, LUL, ...), the same for every
   //                     channel, so they're written per-channel but fetched once.
