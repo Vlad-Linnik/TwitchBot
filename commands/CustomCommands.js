@@ -49,6 +49,31 @@ class Counter {
     }
   }
 
+  // Picks up counter edits made OUTSIDE this process - the TwitchBot-Web panel's
+  // /<channel>/counters page writes the same `counters` collection. Called from
+  // CustomCommands.refreshFromDatabase on its 10s tick. Overwriting the in-memory
+  // snapshot with fresh DB values can never lose an increment (chat updates go through
+  // an atomic $inc and write the returned value back) - at worst a #name substitution
+  // shows a ≤10s-stale number, the same staleness class as command text.
+  refreshFromDatabase = async () =>
+  {
+    for (const ch of this.channelsList) {
+      try {
+        const counters = await ChatStats.getAllCounters(ch);
+        this.counters[ch] = {};
+        this.counterAccess[ch] = {};
+        for (const [name, data] of Object.entries(counters)) {
+          this.counters[ch][name] = data.count;
+          this.counterAccess[ch][name] = data.access;
+        }
+        this.counterKeysList[ch] = Object.keys(this.counters[ch]).sort((a,b) => b.length - a.length);
+      } catch (err) {
+        // Never let a failed refresh kill the interval - the cache just stays as it was.
+        console.error(`[Counter] refresh failed for ${ch}:`, err.message);
+      }
+    }
+  }
+
   isCustomCommandException = (channel, userState) =>
   {
     const exceptions = this.customCommandExceptions[channel];
@@ -96,18 +121,23 @@ class Counter {
     return 1;
   }
 
-  addCounter = async(client, channel, userState, message) => 
+  addCounter = async(client, channel, userState, message) =>
   {
     if (!isMod(userState)) {return 0;}
+    const settings = channelSettings.getSettings(channel);
+    if (!settings.commands.addcounter.enabled) return 0;
     var access = "all";
-    var res = message.match(/!addcounter #([a-zа-я0-9]+)/);
-    if (!res) 
+    var res = message.match(channelSettings.getCommandSignatureArgRegex(channel, 'addcounter', '#([a-zа-я0-9]+)'));
+    if (!res)
     {
-     // incorrect format 
+      if (message.startsWith(settings.commands.addcounter.signature)) {
+        client.say(channel, `Неверный формат 😱 Используйте: ${settings.commands.addcounter.signature} #counter_name [mod] 😎`, userState["id"]);
+        return 1;
+      }
       return 0;
     }
     var newCounter = res[1];
-    if(message.match(/!addcounter #([a-zа-я0-9]+) mod/)){
+    if(message.match(channelSettings.getCommandSignatureArgRegex(channel, 'addcounter', '#([a-zа-я0-9]+) mod'))){
       var access = "mods";
     }
     if (! await ChatStats.isCounterExist(channel, newCounter)){
@@ -132,9 +162,17 @@ class Counter {
   deleteCounter = async(client, channel, userState, message) =>
   {
     if (!isMod(userState)) {return 0;}
-    var res = message.match(/!delcounter #([a-zа-я0-9]+)/);
-    if (!res) return 0;
-    if (!ChatStats.isCounterExist(channel, res[1]))
+    const settings = channelSettings.getSettings(channel);
+    if (!settings.commands.delcounter.enabled) return 0;
+    var res = message.match(channelSettings.getCommandSignatureArgRegex(channel, 'delcounter', '#([a-zа-я0-9]+)'));
+    if (!res) {
+      if (message.startsWith(settings.commands.delcounter.signature)) {
+        client.say(channel, `Неверный формат 😱 Используйте: ${settings.commands.delcounter.signature} #counter_name 😎`, userState["id"]);
+        return 1;
+      }
+      return 0;
+    }
+    if (! await ChatStats.isCounterExist(channel, res[1]))
     { 
       client.say(channel, `такого счетчика не существует 🤷‍♂️`, userState["id"]);
       return 1;
@@ -273,6 +311,8 @@ class CustomCommands {
           console.error(`[CustomCommands] refresh failed for ${ch}:`, err.message);
         }
       }
+      // Counters are web-editable too (/<channel>/counters) - refresh them on the same tick.
+      await this.counter.refreshFromDatabase();
     }
 
     startAutoRefresh = () =>
@@ -404,13 +444,21 @@ class CustomCommands {
       return 1;
     }
 
-  deleteCustomCommand = async(client, channel, userState, message) => 
+  deleteCustomCommand = async(client, channel, userState, message) =>
   {
     if (!isMod(userState)) {return 0;}
-    var res = message.match(/!delcommand !([a-zа-я0-9]+)/);
-    if (!res) return 0;
-    if (!ChatStats.isCommandExist(channel, res[1]))
-    { 
+    const settings = channelSettings.getSettings(channel);
+    if (!settings.commands.delcommand.enabled) return 0;
+    var res = message.match(channelSettings.getCommandSignatureArgRegex(channel, 'delcommand', '!([a-zа-я0-9]+)'));
+    if (!res) {
+      if (message.startsWith(settings.commands.delcommand.signature)) {
+        client.say(channel, `Неверный формат 😱 Используйте: ${settings.commands.delcommand.signature} !command_name 😎`, userState["id"]);
+        return 1;
+      }
+      return 0;
+    }
+    if (! await ChatStats.isCommandExist(channel, res[1]))
+    {
       client.say(channel, `такой команды не существует 🤷‍♂️`, userState["id"]);
       return 1;
     }

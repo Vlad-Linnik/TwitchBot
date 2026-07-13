@@ -1,6 +1,6 @@
 # Bot Commands
 
-Signatures shown are the defaults from `config/channels/default.json` — each channel can override them (`config/channels/<channel>.json`).
+Signatures shown are the defaults from `config/channelSettings.js`'s `DEFAULT_CHANNEL_SETTINGS` — each channel can override them via its `ChannelConfig` doc (edited on the TwitchBot-Web settings pages).
 
 ## Custom commands (mod-managed)
 
@@ -54,9 +54,7 @@ To prevent this, each counter enforces its own cooldown (`commands.counterUpdate
 
 | Command | Access | Description |
 |---|---|---|
-| `!addword <word>` | mod | Track `<word>` for word-count stats (e.g. `!countword`) — not a ban/timeout list. |
-| `!remword <word>` | mod | Stop tracking `<word>`. |
-| `!update7tv` | mod | Re-fetch the channel's configured 7TV emote set (`sevenTv.emoteSetUrl` in channel config) and sync it into the whitelist used for `!topsmiles` tracking — adds new emotes, removes ones no longer in the set. Manually-tracked words (`!addword`) are unaffected. |
+| `!update7tv` | mod | Re-fetch the channel's configured 7TV emote set (`sevenTv.emoteSetUrl` in channel config) and sync it into the whitelist used for `!topsmiles` tracking — adds new emotes, removes ones no longer in the set. Previously manually-tracked words (from the removed `!addword` command) are unaffected. |
 
 Banned-word/obfuscated-spam messages are auto-timed-out (escalating duration) with no command needed; known spam signatures trigger an immediate ban.
 

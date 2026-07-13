@@ -129,8 +129,11 @@ async function bootstrap() {
       // the later sync owns the row - and a channel-specific emote is the more meaningful
       // attribution. Both are fire-and-forget: a failed emote sync must never stop the bot
       // joining the channel, it just means that source isn't tracked until the next restart.
+      // The prune only runs when BOTH syncs succeeded (a failed fetch rejects before it), so a
+      // transient API outage can never make it mistake still-tracked emotes for orphans.
       syncGlobalEmotes(`#${channel}`)
         .then(() => syncChannelEmoteSet(`#${channel}`))
+        .then(() => ChatStats.pruneUntrackedEmoteStats(`#${channel}`))
         .catch(err => console.error(`[Emotes] Sync failed for #${channel}:`, err.message));
     }
     customCommands.startCommandTimers(client);

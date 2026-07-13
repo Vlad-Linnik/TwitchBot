@@ -65,7 +65,7 @@ async function fetchGlobalEmoteNames(force = false) {
  * (`words`, `WordLifetimeStats`) are per-channel, so "how often was Kappa used" only means
  * anything scoped to a channel. The FETCH is shared; only the rows are per-channel.
  *
- * Leaves 'manual' (!addword) and '7tv' rows untouched - see ChatStats.syncEmoteSource().
+ * Leaves 'manual' (legacy !addword rows) and '7tv' rows untouched - see ChatStats.syncEmoteSource().
  */
 async function syncGlobalEmotes(channel) {
   const words = await fetchGlobalEmoteNames();

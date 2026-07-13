@@ -75,8 +75,12 @@ class ChatStats {
     this.globalEmoteStats = null;
     this.chatWordStats = null;
     this.userMentionStats = null;
+    this.userDailyMessageStats = null;
+    this.emoteExclusions = null;
     this.wordBuffer = new Map();
     this.mentionBuffer = new Map();
+    this.messageCountBuffer = new Map();
+    this.exclusionBuffer = new Map();
     this.textStatsFlushTimer = null;
     // Deliberately NOT the same thing as whiteListCache, even though they overlap:
     //   whiteListCache        - what currently COUNTS as a tracked emote (gates `words` /
@@ -117,6 +121,14 @@ class ChatStats {
       // show genuinely different things.
       this.chatWordStats = db.collection("ChatWordStats");
       this.userMentionStats = db.collection("UserMentionStats");
+      // Per-user daily message counts (same epoch-sentinel convention as ChatWordStats), backing
+      // the web panel's period-switchable Top Chatters. UserLifetimeStats stays the all-time
+      // source; this collection exists for the day/week/month ranges.
+      this.userDailyMessageStats = db.collection("UserDailyMessageStats");
+      // Persistent tombstones for the word-cloud emote exclusion. words/WordLifetimeStats rows
+      // of un-tracked emotes get DELETED by pruneUntrackedEmoteStats(), so "ever tracked" can no
+      // longer be derived from WordLifetimeStats alone - this collection is what survives.
+      this.emoteExclusions = db.collection("EmoteExclusions");
 
       await this.commandStats.createIndex({ channel: 1 }, { unique: true });
       await this.modsUpTimeStats.createIndex({ channelId: 1, userId: 1, timestamp: 1 }, { unique: true });
@@ -161,6 +173,9 @@ class ChatStats {
       // thing making the channel word cloud affordable on that VPS.
       await this.chatWordStats.createIndex({ channel: 1, date: 1, count: -1, word: 1 });
       await this.userMentionStats.createIndex({ channel: 1, date: 1, count: -1, mentionedLogin: 1 });
+      await this.userDailyMessageStats.createIndex({ channel: 1, userId: 1, date: 1 }, { unique: true });
+      await this.userDailyMessageStats.createIndex({ channel: 1, date: 1, count: -1, userId: 1 });
+      await this.emoteExclusions.createIndex({ channel: 1, word: 1 }, { unique: true });
       const list = await this.whiteListCollection.find({}).toArray();
       this.whiteListCache = new Map();
       for (const item of list) {
@@ -168,10 +183,11 @@ class ChatStats {
         this.whiteListCache.get(item.channel).add(item.word);
       }
 
-      // Word-cloud exclusion set: every emote this channel tracks now (whiteList) OR ever tracked
-      // (WordLifetimeStats). Lowercased, because `AROLF` the emote and `arolf` as typed are the
-      // same token to a reader even though Twitch treats them as distinct. A few hundred entries
-      // per channel - negligible memory, and it is what keeps the word cloud full of words.
+      // Word-cloud exclusion set: every emote this channel tracks now (whiteList), ever tracked
+      // (WordLifetimeStats), or had pruned away (EmoteExclusions tombstones). Lowercased, because
+      // `AROLF` the emote and `arolf` as typed are the same token to a reader even though Twitch
+      // treats them as distinct. A few hundred entries per channel - negligible memory, and it is
+      // what keeps the word cloud full of words.
       this.emoteExclusionCache = new Map();
       const addExclusion = (channel, word) => {
         if (!this.emoteExclusionCache.has(channel)) this.emoteExclusionCache.set(channel, new Set());
@@ -180,6 +196,8 @@ class ChatStats {
       for (const item of list) addExclusion(item.channel, item.word);
       const historical = await this.wordLifetimeStats.find({}, { projection: { channel: 1, word: 1 } }).toArray();
       for (const item of historical) addExclusion(item.channel, item.word);
+      const tombstones = await this.emoteExclusions.find({}, { projection: { channel: 1, word: 1 } }).toArray();
+      for (const item of tombstones) addExclusion(item.channel, item.word);
 
       this.dbInitialized = true;
       console.log('DB collections initialized');
@@ -323,12 +341,16 @@ class ChatStats {
     return this.emoteExclusionCache.get(channel)?.has(String(token).toLowerCase()) ?? false;
   }
 
-  bufferTextStats(userName, message, channel, timestamp) {
+  bufferTextStats(userId, userName, message, channel, timestamp) {
+    const day = dayBucket(timestamp).getTime();
+
+    // Every message counts here, including pure-emote/command ones that produce no words or
+    // mentions below - same semantics as the UserLifetimeStats counter this sits beside.
+    const countKey = `${channel}${KEY_SEP}${userId}${KEY_SEP}${day}`;
+    this.messageCountBuffer.set(countKey, (this.messageCountBuffer.get(countKey) || 0) + 1);
+
     const words = extractWords(message, (word) => this.isTrackedEmote(channel, word));
     const mentions = extractMentions(message, [userName]);
-    if (words.length === 0 && mentions.length === 0) return;
-
-    const day = dayBucket(timestamp).getTime();
     for (const word of words) {
       const key = `${channel}${KEY_SEP}${word}${KEY_SEP}${day}`;
       this.wordBuffer.set(key, (this.wordBuffer.get(key) || 0) + 1);
@@ -355,12 +377,21 @@ class ChatStats {
   // Swap-then-write: the buffers are emptied before the await so counts arriving during the
   // flush accumulate into the next batch instead of being double-counted or lost.
   async flushTextStats() {
-    if (this.wordBuffer.size === 0 && this.mentionBuffer.size === 0) return;
+    if (
+      this.wordBuffer.size === 0 &&
+      this.mentionBuffer.size === 0 &&
+      this.messageCountBuffer.size === 0 &&
+      this.exclusionBuffer.size === 0
+    ) return;
 
     const words = this.wordBuffer;
     const mentions = this.mentionBuffer;
+    const messageCounts = this.messageCountBuffer;
+    const exclusions = this.exclusionBuffer;
     this.wordBuffer = new Map();
     this.mentionBuffer = new Map();
+    this.messageCountBuffer = new Map();
+    this.exclusionBuffer = new Map();
 
     await this.ensureInitialized();
 
@@ -386,6 +417,19 @@ class ChatStats {
 
     const wordOps = buildOps(words, 'word');
     const mentionOps = buildOps(mentions, 'mentionedLogin');
+    const messageCountOps = buildOps(messageCounts, 'userId');
+
+    const exclusionOps = [];
+    for (const key of exclusions.keys()) {
+      const [channel, word] = key.split(KEY_SEP);
+      exclusionOps.push({
+        updateOne: {
+          filter: { channel, word },
+          update: { $setOnInsert: { channel, word, createdAt: new Date() } },
+          upsert: true,
+        },
+      });
+    }
 
     await Promise.all([
       wordOps.length
@@ -395,6 +439,14 @@ class ChatStats {
       mentionOps.length
         ? this.userMentionStats.bulkWrite(mentionOps, { ordered: false })
             .catch((err) => console.error('[DB] userMentionStats bulk write error:', err))
+        : null,
+      messageCountOps.length
+        ? this.userDailyMessageStats.bulkWrite(messageCountOps, { ordered: false })
+            .catch((err) => console.error('[DB] userDailyMessageStats bulk write error:', err))
+        : null,
+      exclusionOps.length
+        ? this.emoteExclusions.bulkWrite(exclusionOps, { ordered: false })
+            .catch((err) => console.error('[DB] emoteExclusions bulk write error:', err))
         : null,
     ]);
   }
@@ -571,30 +623,19 @@ class ChatStats {
     return count;
   }
 
-  async addToWhiteList(channel, word) {
-    await this.ensureInitialized();
-    await this.whiteListCollection.updateOne(
-      { channel, word },
-      { $set: { channel, word, source: 'manual' }, $unset: { setId: '' } },
-      { upsert: true }
-    );
-    if (!this.whiteListCache.has(channel)) this.whiteListCache.set(channel, new Set());
-    this.whiteListCache.get(channel).add(word);
-    this.rememberEmote(channel, word);
-  }
-
-  // Exclusion is append-only: removeFromWhiteList / a 7TV set that drops an emote stops it being
-  // COUNTED, but it must stay barred from the word cloud, because the chat still uses it and its
-  // historical counts still exist. Un-excluding it would let it resurface as a fake "word".
+  // Exclusion is append-only: a 7TV set that drops an emote stops it being COUNTED, but it must
+  // stay barred from the word cloud, because the chat still uses it and its counts once existed.
+  // Un-excluding it would let it resurface as a fake "word". Besides the in-memory cache, each
+  // pair is buffered into the persistent EmoteExclusions tombstones (flushed with the text-stats
+  // batch, never awaited here) - pruneUntrackedEmoteStats() deletes the WordLifetimeStats rows
+  // the exclusion used to be derivable from, so the tombstone is what makes it survive restarts.
   rememberEmote(channel, word) {
     if (!this.emoteExclusionCache.has(channel)) this.emoteExclusionCache.set(channel, new Set());
-    this.emoteExclusionCache.get(channel).add(String(word).toLowerCase());
-  }
-
-  async removeFromWhiteList(channel, word) {
-    await this.ensureInitialized();
-    await this.whiteListCollection.deleteOne({ channel, word });
-    this.whiteListCache.get(channel)?.delete(word);
+    const lowered = String(word).toLowerCase();
+    if (this.emoteExclusionCache.get(channel).has(lowered)) return;
+    this.emoteExclusionCache.get(channel).add(lowered);
+    this.exclusionBuffer.set(`${channel}${KEY_SEP}${lowered}`, true);
+    this.scheduleTextStatsFlush();
   }
 
   isInWhiteList(channel, word) {
@@ -606,7 +647,8 @@ class ChatStats {
   //
   // `source` is the isolation boundary, and that is the whole point of this being generic. The
   // whitelist holds three independent populations:
-  //   'manual'        - added by a mod with !addword. Never touched by any sync.
+  //   'manual'        - added by a mod with the (since-removed) !addword command. The command is
+  //                     gone but its rows persist and must still never be touched by any sync.
   //   '7tv'           - the channel's own 7TV emote set.
   //   'twitch-global' - Twitch's official global emotes (Kappa, LUL, ...), the same for every
   //                     channel, so they're written per-channel but fetched once.
@@ -649,6 +691,54 @@ class ChatStats {
 
   async syncSevenTvEmoteSet(channel, setId, words) {
     return this.syncEmoteSource(channel, '7tv', words, { setId });
+  }
+
+  // Deletes the accumulated stats (words + WordLifetimeStats) of every emote the channel no
+  // longer tracks under ANY source, so un-tracked emotes stop showing on the web emote cloud.
+  // Must only run after this channel's syncs succeeded - index.js chains it after both - since
+  // the whitelist is the reference for what "tracked" means. Tombstones are written BEFORE the
+  // delete so a crash in between can never un-exclude an emote from the word cloud.
+  async pruneUntrackedEmoteStats(channel) {
+    await this.ensureInitialized();
+
+    const whitelisted = new Set(
+      (await this.whiteListCollection.find({ channel }, { projection: { word: 1 } }).toArray())
+        .map(item => item.word)
+    );
+    // A successful global-emote sync alone leaves ~290 rows, so an empty whitelist here means
+    // something upstream went wrong - sweeping now would delete the channel's entire emote
+    // history. Skip rather than trust it.
+    if (whitelisted.size === 0) {
+      console.warn(`[Emotes] Prune skipped for ${channel}: whitelist is empty`);
+      return { pruned: 0 };
+    }
+
+    const [lifetimeWords, dailyWords] = await Promise.all([
+      this.wordLifetimeStats.distinct('word', { channel }),
+      this.wordsCollection.distinct('word', { channel }),
+    ]);
+    const orphans = [...new Set([...lifetimeWords, ...dailyWords])].filter(word => !whitelisted.has(word));
+    if (orphans.length === 0) return { pruned: 0 };
+
+    await this.emoteExclusions.bulkWrite(orphans.map(word => ({
+      updateOne: {
+        filter: { channel, word: String(word).toLowerCase() },
+        update: { $setOnInsert: { channel, word: String(word).toLowerCase(), createdAt: new Date() } },
+        upsert: true,
+      },
+    })), { ordered: false });
+
+    await Promise.all([
+      this.wordsCollection.deleteMany({ channel, word: { $in: orphans } }),
+      this.wordLifetimeStats.deleteMany({ channel, word: { $in: orphans } }),
+    ]);
+
+    // Keep the in-memory exclusion set consistent (usually a no-op - initialize() already read
+    // these words out of WordLifetimeStats before they were deleted).
+    orphans.forEach(word => this.rememberEmote(channel, word));
+
+    console.log(`[Emotes] Pruned ${orphans.length} un-tracked emote(s) from ${channel}'s stats`);
+    return { pruned: orphans.length };
   }
 
   // Twitch's official global emotes. They are identical for every channel, so the caller fetches
@@ -700,7 +790,7 @@ class ChatStats {
     // Word-frequency + @mention counters for the web panel's clouds and mention tracker.
     // Purely in-memory here (no await, no I/O) - the actual Mongo write is the coalesced
     // flush a few seconds later, so this costs the chat path a tokenize and a few Map sets.
-    this.bufferTextStats(userName, message, channel, timestamp);
+    this.bufferTextStats(userId, userName, message, channel, timestamp);
 
     // Twitch only ever renders emotes/smileys as their own whitespace-delimited
     // token anyway, so a plain split is enough - no regex needed.
