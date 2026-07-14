@@ -116,6 +116,10 @@ async function bootstrap() {
   async function start() {
     await TokenManager.start(client);
     client.opts.identity.password = botInitInfo.settings["password"];
+    // Resolve known bot logins -> ids (config/knownBots.js) so ChatStats can skip their
+    // ModeratorStatistics/ModUpTimeStats writes. After TokenManager.start so the app token
+    // its Helix lookup needs already exists; non-fatal on failure by design.
+    await require('./config/knownBots.js').resolveKnownBotIds();
     for (let channel of Object.keys(botInitInfo.channels)) {
       // Seed the in-memory moderator cache from the DB before anything else for this channel
       // starts, so EventManager/ActivityTracker never read an empty cache while it loads.
