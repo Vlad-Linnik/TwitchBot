@@ -55,6 +55,9 @@ async function fetchGlobalEmoteNames(force = false) {
   // 303") that never matches the rows that actually exist.
   const names = (response.data?.data ?? []).map((emote) => emote.name).filter(Boolean);
   cachedNames = [...new Set(names)];
+  // The one log line for global emotes: the list is identical for every channel, so logging it
+  // once per FETCH (not once per channel synced) is what matches reality.
+  console.log(`[TwitchEmotes] Fetched ${cachedNames.length} global emotes (shared across all channels)`);
   return cachedNames;
 }
 
@@ -72,8 +75,12 @@ async function syncGlobalEmotes(channel) {
   if (words.length === 0) return null;
 
   const result = await ChatStats.syncTwitchGlobalEmotes(channel, words);
-  console.log(`[TwitchEmotes] Synced ${result.synced} global emotes for ${channel}` +
-    (result.removed ? ` (removed ${result.removed} stale)` : ''));
+  // Per-channel sync stays silent unless something actually changed for that channel - the
+  // shared fetch above already logged the list once, and N identical "synced 289" lines were
+  // just noise implying N fetches that never happened.
+  if (result.removed) {
+    console.log(`[TwitchEmotes] ${channel}: removed ${result.removed} stale global emotes`);
+  }
   return { words, ...result };
 }
 

@@ -1,5 +1,6 @@
 const { connect } = require('./db.js');
 const { extractWords, extractMentions, dayBucket, LIFETIME_BUCKET } = require('../shared/textStats.js');
+const { isKnownBot } = require('../config/knownBots.js');
 
 const MIN_TIMEOUT_MS = 1000; // 1 second, Twitch's shortest timeout
 const MAX_TIMEOUT_MS = 1_209_600_000; // 1,209,600s = 2 weeks, Twitch's longest timeout
@@ -219,7 +220,10 @@ class ChatStats {
   // instead of absorbing minutes that happened the day before (or vice versa).
   async updateModUpTime(channelId, activeUserIds, intervalStart, intervalEnd) {
     await this.ensureInitialized();
-    if (!activeUserIds || activeUserIds.length === 0) return;
+    // Bot accounts (config/knownBots.js) hold mod status but aren't people - filtered at the
+    // write itself so no caller can accidentally track them.
+    activeUserIds = (activeUserIds || []).filter((id) => !isKnownBot(id));
+    if (activeUserIds.length === 0) return;
 
     const allTimeDate = new Date(0);
     const totalHours = (intervalEnd - intervalStart) / 3600000;
@@ -262,7 +266,10 @@ class ChatStats {
   // day (e.g. the stream flaps offline/online again later) without creating duplicate rows.
   async recordDailyModeratorStats(channelId, channelLogin, moderatorIds) {
     await this.ensureInitialized();
-    if (!moderatorIds || moderatorIds.length === 0) return;
+    // Same known-bot filter as updateModUpTime - a bot's daily roll-up row would put it
+    // straight into the web panel's moderator table.
+    moderatorIds = (moderatorIds || []).filter((id) => !isKnownBot(id));
+    if (moderatorIds.length === 0) return;
 
     const dayStart = new Date();
     dayStart.setHours(0, 0, 0, 0);
@@ -301,6 +308,13 @@ class ChatStats {
 
       const moderationActivity = actionLogs.length;
 
+      // A moderator who never showed up that day (no messages, no presence, no actions) gets
+      // NO row at all - an all-zero row carries no information, but its existence used to make
+      // the web panel treat the mod as "has data", rendering a zero line even with the
+      // "show moderators with no data" toggle off. scripts/cleanupModeratorStats.js removes
+      // the all-zero rows written before this guard existed.
+      if (chatActivity === 0 && streamPresence === 0 && moderationActivity === 0) continue;
+
       operations.push({
         updateOne: {
           filter: { channelId, userId, date: dayStart },
@@ -317,7 +331,10 @@ class ChatStats {
     }
 
     try {
-      await this.modStats.bulkWrite(operations, { ordered: false });
+      // Can be empty now that all-zero days are skipped - bulkWrite rejects an empty batch.
+      if (operations.length > 0) {
+        await this.modStats.bulkWrite(operations, { ordered: false });
+      }
     } catch (err) {
       console.error('[DB] recordDailyModeratorStats error:', err);
     }

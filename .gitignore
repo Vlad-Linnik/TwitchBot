@@ -12,3 +12,4 @@ config/channels/*.json
 CLAUDE.md
 .gitignore
 graphify-out/
+scripts/local/
