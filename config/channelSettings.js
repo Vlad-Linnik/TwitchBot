@@ -49,7 +49,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
 // login -> { settings, expiresAt }
 const settingsCache = new Map();
 const bannedWordsRegexCache = new Map();
-const refreshing = new Set();
+const refreshing = new Map(); // login -> in-flight refresh promise (dedupes AND lets getSettingsFresh await it)
 let channelConfigCollection;
 
 function normalizeChannel(channel) {
@@ -87,20 +87,23 @@ function setCache(login, settings, ttlMs = CACHE_TTL_MS) {
 // exists yet or Mongo is unreachable (there's no more per-channel JSON file fallback -
 // all channels are expected to have a ChannelConfig doc). Callers always read the
 // (possibly briefly stale) cache synchronously via getSettings() and never wait on this.
-async function refreshFromMongo(login) {
-  if (refreshing.has(login)) return;
-  refreshing.add(login);
-  try {
-    const col = await ensureCollection();
-    const doc = await col.findOne({ channelLogin: login });
-    const settings = doc ? deepMerge(DEFAULT_CHANNEL_SETTINGS, doc) : DEFAULT_CHANNEL_SETTINGS;
-    setCache(login, settings);
-  } catch (err) {
-    console.error(`[channelSettings] Mongo refresh failed for "${login}":`, err.message);
-    if (!settingsCache.has(login)) setCache(login, DEFAULT_CHANNEL_SETTINGS, 0);
-  } finally {
-    refreshing.delete(login);
-  }
+function refreshFromMongo(login) {
+  if (refreshing.has(login)) return refreshing.get(login);
+  const promise = (async () => {
+    try {
+      const col = await ensureCollection();
+      const doc = await col.findOne({ channelLogin: login });
+      const settings = doc ? deepMerge(DEFAULT_CHANNEL_SETTINGS, doc) : DEFAULT_CHANNEL_SETTINGS;
+      setCache(login, settings);
+    } catch (err) {
+      console.error(`[channelSettings] Mongo refresh failed for "${login}":`, err.message);
+      if (!settingsCache.has(login)) setCache(login, DEFAULT_CHANNEL_SETTINGS, 0);
+    } finally {
+      refreshing.delete(login);
+    }
+  })();
+  refreshing.set(login, promise);
+  return promise;
 }
 
 function getSettings(channel) {
@@ -118,6 +121,21 @@ function getSettings(channel) {
   }
 
   return cached.settings;
+}
+
+// Awaitable variant for the few callers that must see the channel's REAL ChannelConfig doc
+// rather than the possibly-still-default synchronous cache. The emote sync is the motivating
+// case: at startup the very first getSettings() call returns bare defaults (empty
+// sevenTv.emoteSetUrl) while the Mongo read happens in the background, which made the startup
+// 7TV sync silently skip the channel. Message handlers should keep using getSettings() -
+// never block chat on a DB round-trip.
+async function getSettingsFresh(channel) {
+  const login = normalizeChannel(channel);
+  const cached = settingsCache.get(login);
+  if (!cached || Date.now() >= cached.expiresAt) {
+    await refreshFromMongo(login);
+  }
+  return settingsCache.get(login).settings;
 }
 
 function escapeRegExp(word) {
@@ -158,6 +176,7 @@ function reload() {
 
 module.exports = {
   getSettings,
+  getSettingsFresh,
   getBannedWordsRegex,
   getCommandSignatureRegex,
   getCommandSignatureArgRegex,

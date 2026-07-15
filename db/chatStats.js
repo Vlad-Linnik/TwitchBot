@@ -137,6 +137,11 @@ class ChatStats {
       await this.modStats.createIndex({ channelId: 1, userId: 1, date: 1 }, { unique: true });
       await this.modList.createIndex({ channelId: 1 }, { unique: true });
       await this.modLogs.createIndex({ channel: 1, timestamp: -1, userId: 1 });
+      // The web panel's mod-action log filters by moderator ($in on modID, newest first) and
+      // builds its filter options from distinct('modID', {channel}) - both ride this index.
+      // The exclude ($nin) and action-type filters stay on the {channel, timestamp} scan above,
+      // which is fine at this collection's size.
+      await this.modLogs.createIndex({ channel: 1, modID: 1, timestamp: -1 });
       await this.messagesCollection.createIndex({ channel: 1, timestamp: -1, userId: 1 });
       // Every per-user page on the web panel (message-count chart, activity heatmap, that
       // user's word/emote cloud, the moderator-only log view) filters by {channel, userId}
@@ -646,13 +651,46 @@ class ChatStats {
   // pair is buffered into the persistent EmoteExclusions tombstones (flushed with the text-stats
   // batch, never awaited here) - pruneUntrackedEmoteStats() deletes the WordLifetimeStats rows
   // the exclusion used to be derivable from, so the tombstone is what makes it survive restarts.
+  // Returns true when the word was NEW to the exclusion set - the cache is seeded at startup
+  // from the full whiteList ∪ WordLifetimeStats ∪ EmoteExclusions union, so "new here" means
+  // "was never excluded by any mechanism", which is exactly the population whose accumulated
+  // ChatWordStats rows need purging (see purgeWordStatsForEmotes).
   rememberEmote(channel, word) {
     if (!this.emoteExclusionCache.has(channel)) this.emoteExclusionCache.set(channel, new Set());
     const lowered = String(word).toLowerCase();
-    if (this.emoteExclusionCache.get(channel).has(lowered)) return;
+    if (this.emoteExclusionCache.get(channel).has(lowered)) return false;
     this.emoteExclusionCache.get(channel).add(lowered);
     this.exclusionBuffer.set(`${channel}${KEY_SEP}${lowered}`, true);
     this.scheduleTextStatsFlush();
+    return true;
+  }
+
+  // Retroactive word-cloud cleanup: a token that chat used BEFORE it became a tracked emote has
+  // been accumulating in ChatWordStats as an ordinary "word", and the exclusion cache only stops
+  // FUTURE counting. Deleting by {channel, word} (no date) removes the daily rows and the
+  // epoch-sentinel all-time row in one call, riding the {channel, word, date} unique index's
+  // prefix. Never throws - a failed purge must not fail the emote sync it runs inside; the
+  // exclusion tombstone is already buffered, so the emote stays out of the cloud either way
+  // (the stale rows would just survive until the emote is next "new" somewhere).
+  async purgeWordStatsForEmotes(channel, loweredWords) {
+    if (!loweredWords || loweredWords.length === 0) return { purged: 0 };
+    try {
+      // Sweep the pending flush buffer too: a count buffered in the current <=5s window would
+      // otherwise be upserted right back after the delete.
+      const purgeSet = new Set(loweredWords);
+      for (const key of [...this.wordBuffer.keys()]) {
+        const [keyChannel, word] = key.split(KEY_SEP);
+        if (keyChannel === channel && purgeSet.has(word)) this.wordBuffer.delete(key);
+      }
+      const result = await this.chatWordStats.deleteMany({ channel, word: { $in: loweredWords } });
+      if (result.deletedCount > 0) {
+        console.log(`[Emotes] Purged ${result.deletedCount} word-stat row(s) for ${loweredWords.length} newly-excluded emote(s) in ${channel}`);
+      }
+      return { purged: result.deletedCount };
+    } catch (err) {
+      console.error(`[Emotes] purgeWordStatsForEmotes failed for ${channel}:`, err);
+      return { purged: 0 };
+    }
   }
 
   isInWhiteList(channel, word) {
@@ -701,7 +739,16 @@ class ChatStats {
     wordSet.forEach(word => cacheSet.add(word));
     this.whiteListCache.set(channel, cacheSet);
     // staleWords are intentionally NOT un-excluded from the word cloud - see rememberEmote().
-    wordSet.forEach(word => this.rememberEmote(channel, word));
+    // Words that are NEW to the exclusion set were, until now, being counted into ChatWordStats
+    // as ordinary words - purge those rows so the new emote also disappears from the word cloud
+    // retroactively, not just going forward.
+    const newlyExcluded = [];
+    wordSet.forEach(word => {
+      if (this.rememberEmote(channel, word)) newlyExcluded.push(String(word).toLowerCase());
+    });
+    if (newlyExcluded.length > 0) {
+      await this.purgeWordStatsForEmotes(channel, newlyExcluded);
+    }
 
     return { synced: words.length, removed: staleWords.length };
   }
