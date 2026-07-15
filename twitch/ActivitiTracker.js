@@ -3,6 +3,7 @@ const botInitInfo = require('../botInitInfo');
 const ChatStats = require('../db/chatStats.js');
 const streamStatus = require('./streamStatus.js');
 const moderators = require('./moderators.js');
+const emoteSyncScheduler = require('./emoteSyncScheduler.js');
 
 
 class ModActivityTracker {
@@ -108,10 +109,16 @@ class ModActivityTracker {
             }
 
             const wasLiveWithBaseline = this.isLive && this.lastCheckTime !== null;
-            if (!this.isLive) {
+            const justWentLive = !this.isLive;
+            if (justWentLive) {
                 console.log(`[ModTracker] [${this.channelLogin}] Stream started`);
             }
             this.isLive = true;
+
+            // Piggyback the emote re-sync schedule on this poll: it already owns the
+            // offline->live transition and never reaches here on an unknown (null) status.
+            // Fire-and-forget inside the scheduler - never blocks activity accounting.
+            emoteSyncScheduler.maybeSyncOnLiveTick(this.channelLogin, justWentLive);
 
             const currentChatters = await this.getAllChatters();
 

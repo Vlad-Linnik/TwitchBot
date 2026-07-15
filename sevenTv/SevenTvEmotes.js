@@ -40,8 +40,13 @@ async function fetchEmoteSetWords(link) {
 // Looks up the channel's configured 7TV set link and upserts its emotes into
 // that channel's whitelist, removing any previously-synced emotes no longer in the set.
 // Returns null if the channel has no 7TV set configured.
+// getSettingsFresh, not getSettings: at startup the synchronous cache still holds bare
+// defaults (empty emoteSetUrl) while ChannelConfig loads in the background, and this sync
+// would silently skip the channel. Waiting one Mongo read is fine here - emote syncs are
+// never on the chat-message path.
 async function syncChannelEmoteSet(channel) {
-  const link = channelSettings.getSettings(channel).sevenTv?.emoteSetUrl;
+  const settings = await channelSettings.getSettingsFresh(channel);
+  const link = settings.sevenTv?.emoteSetUrl;
   if (!link) return null;
 
   const { setId, words } = await fetchEmoteSetWords(link);

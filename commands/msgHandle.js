@@ -15,7 +15,6 @@ const { isTimerReady } = require("../shared/timer.js");
 const ChatStats = require('../db/chatStats.js');
 const botInitInfo = require("../botInitInfo.js");
 const {muteDuelAccept, muteDuel, timeChanger} = require("../games/muteDuel.js");
-const {getDatabaseStatsSummary} = require("../db/db.js");
 const { spawn } = require('child_process');
 const {customCommands, counter} = require("./CustomCommands.js");
 const Twitch_ban_API = require("../twitch/TwitchBanAPI.js");
@@ -97,7 +96,6 @@ async function get_bot_info (client, channel, userState, message) {
   if (!settings.commands.botinfo.enabled) return 0;
   const regex = channelSettings.getCommandSignatureRegex(channel, 'botinfo', 'signature', { anchored: false });
   if (isMod(userState) && message.toLocaleLowerCase().match(regex)){
-    var DBstats = await getDatabaseStatsSummary();
     var timeD = new Date() - botInitInfo.settings["startTime"];
     var info = `works: ${timeChanger(timeD/1000)}`;
     client.say(channel, info, userState["id"]);
@@ -215,6 +213,13 @@ async function updateSevenTvEmotes(client, channel, userState, message) {
 
   try {
     const { words } = await syncChannelEmoteSet(channel);
+    // Same follow-up the startup/scheduled sync chain does: emotes dropped from the set get
+    // their words/WordLifetimeStats rows pruned so they leave the web emote cloud. Safe here
+    // even though only the 7TV half re-synced - the whitelist still holds the startup-synced
+    // twitch-global rows, so the empty-whitelist guard and "tracked under ANY source"
+    // semantics hold. This manual path deliberately does NOT touch emoteSyncScheduler's
+    // 3-per-24h cap; it is governed by its own per-channel cooldownMs instead.
+    await ChatStats.pruneUntrackedEmoteStats(channel);
     client.say(channel, `7TV эмоуты обновлены: ${words.length} ✅`, userState["id"]);
   } catch (err) {
     console.error('[7TV] Manual update failed:', err.message);

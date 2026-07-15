@@ -17,8 +17,7 @@ async function bootstrap() {
   const ActivityTracker = require('./twitch/ActivitiTracker.js');
   const moderators = require('./twitch/moderators.js');
   const { customCommands } = require('./commands/CustomCommands.js');
-  const { syncChannelEmoteSet } = require('./sevenTv/SevenTvEmotes.js');
-  const { syncGlobalEmotes } = require('./twitch/globalEmotes.js');
+  const emoteSyncScheduler = require('./twitch/emoteSyncScheduler.js');
 
   // bot settings
   const opts = {
@@ -128,16 +127,14 @@ async function bootstrap() {
       TwitchEvent.connect();
       ModsActivitiTracker = new ActivityTracker(botInitInfo.channels[channel].id, channel);
       ModsActivitiTracker.start();
-      // Twitch's global emotes FIRST, then the channel's own 7TV set. The order matters: the
-      // whitelist's unique key is {channel, word}, so if a 7TV set aliases a global emote's name
-      // the later sync owns the row - and a channel-specific emote is the more meaningful
-      // attribution. Both are fire-and-forget: a failed emote sync must never stop the bot
-      // joining the channel, it just means that source isn't tracked until the next restart.
-      // The prune only runs when BOTH syncs succeeded (a failed fetch rejects before it), so a
-      // transient API outage can never make it mistake still-tracked emotes for orphans.
-      syncGlobalEmotes(`#${channel}`)
-        .then(() => syncChannelEmoteSet(`#${channel}`))
-        .then(() => ChatStats.pruneUntrackedEmoteStats(`#${channel}`))
+      // Startup emote sync (globals -> 7TV -> prune; ordering rationale lives in
+      // emoteSyncScheduler.syncNow). Going through the scheduler makes this startup run count
+      // toward the 3-per-24h re-sync cap and seed lastSyncAt - so a stream already live at bot
+      // start (the tracker can't see that as a transition) still gets its next re-sync 4h from
+      // NOW rather than 5 minutes after boot. Fire-and-forget: a failed emote sync must never
+      // stop the bot joining the channel, it just means that source isn't tracked until the
+      // next scheduled re-sync or restart.
+      emoteSyncScheduler.syncNow(channel)
         .catch(err => console.error(`[Emotes] Sync failed for #${channel}:`, err.message));
     }
     customCommands.startCommandTimers(client);
