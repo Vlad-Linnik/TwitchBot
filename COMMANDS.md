@@ -10,6 +10,7 @@ Signatures shown are the defaults from `config/channelSettings.js`'s `DEFAULT_CH
 | `!delcommand !name` | mod | Delete a custom command. |
 | `!settimer !name <seconds>\|off` | mod | Auto-post that command's text every `<seconds>` seconds (minimum 60); `off` disables auto-posting. Commands sharing an identical interval are spread evenly across it so they don't fire together. A manual `!name` trigger in chat resets that command's auto-post clock. An auto-post only actually fires when the stream is live (skipped in debug mode, see `DEBUG_MODE` in `.env`) and at least `commands.customCommandTimer.minMessagesBetween` ordinary chat messages (default 10, configurable per channel) have happened since the last auto-post — this also guarantees no two auto-posts land back-to-back. |
 | `!setpin !name on\|off` | mod | Toggle auto-pin: when on, every send of that command (manual trigger or timer auto-post) pins the sent message via Twitch's chat pin, staying pinned until the stream ends (replacing any message already pinned). Since only mods can pin, a pin-enabled command can only be triggered by mods — non-mods' `!name` is silently ignored. A command can't have `timer` and `pin` on at the same time — `!settimer`/`!setpin` reject the change with an explanation if the other attribute is already active; disable it first. |
+| `!setannounce !name on\|off` | mod | Toggle sending that command as a Twitch chat announcement (a colored, highlighted system-style message) instead of a plain message — works for both manual triggers and timer auto-posts. The color is configured on the TwitchBot-Web `/<channel>/commands` page (default: primary). Mutually exclusive with `pin` (an announcement is a self-contained send with no message ID to pin) — `!setpin`/`!setannounce` reject the change if the other is already active. If the bot's token lacks the `moderator:manage:announcements` scope, the send falls back to a plain message instead of failing silently. |
 | `!customcommands` | all | List all custom command names for the channel. |
 | `!name` | all (mod-only if auto-pin is on for that command) | Trigger a custom command (`#counterName` inside its text is replaced with the counter's live value). |
 
@@ -49,6 +50,7 @@ To prevent this, each counter enforces its own cooldown (`commands.counterUpdate
 | `!countmsg [period]` | all | Your message count and rank for the period. |
 | `!countunique [period]` | all | Count of unique chatters for the period. |
 | `!botinfo` | mod | Bot uptime and DB stats summary. |
+| `!randomclip` | all | Posts a random clip from the channel's top 100 most-viewed clips (Twitch Helix Get Clips). |
 
 ## Moderation
 

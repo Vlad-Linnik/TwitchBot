@@ -5,6 +5,13 @@ const { isKnownBot } = require('../config/knownBots.js');
 const MIN_TIMEOUT_MS = 1000; // 1 second, Twitch's shortest timeout
 const MAX_TIMEOUT_MS = 1_209_600_000; // 1,209,600s = 2 weeks, Twitch's longest timeout
 
+// A reaction slower than this is excluded from a moderator's daily "Avg reaction" average -
+// past this, it's less "how fast do they react" and more "were they even watching", which
+// would drag the average away from what it's meant to represent. Matches
+// TwitchBot-Web/db/statsRepo.js's MOD_ACTION_CONTEXT_MAX_TTA_MS (kept in sync by hand, same
+// convention as the other shared-schema constants documented in ../CLAUDE.md).
+const REACTION_SPEED_MAX_TTA_MS = 120000; // 2 minutes
+
 // Maps a timeout's duration onto the 1-9 severity band. Log-scaled because timeouts span
 // six orders of magnitude (1s..2 weeks) - a linear scale would put almost every real-world
 // timeout near 1.
@@ -302,7 +309,7 @@ class ChatStats {
 
       const validTTAs = actionLogs
         .map(log => log.TTA)
-        .filter(tta => tta !== null && tta !== undefined && tta <= 30000);
+        .filter(tta => tta !== null && tta !== undefined && tta <= REACTION_SPEED_MAX_TTA_MS);
       const reactionSpeed = validTTAs.length > 0
         ? validTTAs.reduce((sum, tta) => sum + tta, 0) / validTTAs.length
         : null;
@@ -568,14 +575,20 @@ class ChatStats {
     var CommandsDict = {}
     var Info = await this.customCommandsCollection.find({channel: channel}).toArray();
     for (const command of Info) {
-        CommandsDict[command["command"]] = {result: command["result"], timer: command["timer"], pin: command["pin"] || false};
+        CommandsDict[command["command"]] = {
+          result: command["result"],
+          timer: command["timer"],
+          pin: command["pin"] || false,
+          announce: command["announce"] || false,
+          announceColor: command["announceColor"] || "primary",
+        };
     }
     return CommandsDict;
   }
 
-  async addNewCustomCommand(channel, command, result, timer = null, pin = false) {
+  async addNewCustomCommand(channel, command, result, timer = null, pin = false, announce = false, announceColor = "primary") {
     await this.ensureInitialized();
-    this.customCommandsCollection.insertOne({channel, command, result, timer, pin})
+    this.customCommandsCollection.insertOne({channel, command, result, timer, pin, announce, announceColor})
       .catch(err => console.error('[DB] addNewCustomCommand error:', err));
   }
 
@@ -587,7 +600,7 @@ class ChatStats {
       .catch(err => console.error('[DB] deleteCustomCommand error:', err));
   }
 
-  async editCustomCommand(channel, command, new_result, new_timer = null, new_pin = false) {
+  async editCustomCommand(channel, command, new_result, new_timer = null, new_pin = false, new_announce = false, new_announceColor = "primary") {
     await this.ensureInitialized();
     this.customCommandsCollection.updateOne({channel:channel, command:command},
     {
@@ -595,7 +608,9 @@ class ChatStats {
       {
         result: new_result,
         timer: new_timer,
-        pin: new_pin
+        pin: new_pin,
+        announce: new_announce,
+        announceColor: new_announceColor
       }
     }).catch(err => console.error('[DB] editCustomCommand error:', err));
   }
