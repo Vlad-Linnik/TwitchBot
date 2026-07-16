@@ -84,7 +84,11 @@ class ModActivityTracker {
             // Read fresh every cycle so mod/unmod EventSub updates (see events.js) are picked
             // up without needing a bot restart - the cache itself is updated in real time, so
             // this is just a synchronous read, not a network call.
-            const currentModerators = moderators.getModerators(this.broadcasterId);
+            // The broadcaster is never granted "mod" via channel.moderate (Twitch doesn't model
+            // it that way), so moderators.js's ModsList-derived cache never contains them - union
+            // them in here so the owner gets tracked the same as any other moderator.
+            const currentModerators = new Set(moderators.getModerators(this.broadcasterId));
+            currentModerators.add(String(this.broadcasterId));
 
             const liveResult = await this.isStreamLive();
             const now = Date.now();
