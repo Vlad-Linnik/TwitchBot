@@ -716,18 +716,21 @@ class ChatStats {
   // ones, drops the ones that source no longer lists, and leaves every other source alone.
   //
   // `source` is the isolation boundary, and that is the whole point of this being generic. The
-  // whitelist holds three independent populations:
-  //   'manual'        - added by a mod with the (since-removed) !addword command. The command is
-  //                     gone but its rows persist and must still never be touched by any sync.
-  //   '7tv'           - the channel's own 7TV emote set.
-  //   'twitch-global' - Twitch's official global emotes (Kappa, LUL, ...), the same for every
-  //                     channel, so they're written per-channel but fetched once.
+  // whitelist holds four independent populations:
+  //   'manual'         - added by a mod with the (since-removed) !addword command. The command is
+  //                      gone but its rows persist and must still never be touched by any sync.
+  //   '7tv'            - the channel's own 7TV emote set.
+  //   'twitch-global'  - Twitch's official global emotes (Kappa, LUL, ...), the same for every
+  //                      channel, so they're written per-channel but fetched once.
+  //   'twitch-channel' - the broadcaster's own Twitch emotes (sub tiers, bits, follower), fetched
+  //                      and written per-channel since they genuinely differ per broadcaster.
   // A sync of one must never delete another's rows, which is why the stale-delete below is
   // scoped by `source` and not just by `channel`.
   //
   // Collisions: the unique index is {channel, word}, so if two sources ship the same name, the
-  // LAST sync to run owns the row. index.js syncs globals before 7TV precisely so the channel's
-  // own 7TV set wins - a channel-specific emote is the more meaningful attribution.
+  // LAST sync to run owns the row. emoteSyncScheduler.syncNow() syncs globals, then channel
+  // emotes, then 7TV last, precisely so the channel's own 7TV set wins - a 7TV set is the most
+  // deliberately curated of the three, so it's the most meaningful attribution on a collision.
   async syncEmoteSource(channel, source, words, extraFields = {}) {
     await this.ensureInitialized();
     const wordSet = new Set(words);
@@ -825,6 +828,13 @@ class ChatStats {
   // `words`/`WordLifetimeStats` are per-channel, so the rows have to be too.
   async syncTwitchGlobalEmotes(channel, words) {
     return this.syncEmoteSource(channel, 'twitch-global', words);
+  }
+
+  // The broadcaster's own Twitch emotes (sub tiers, bits/cheer, follower) - see
+  // twitch/channelEmotes.js. Unlike syncTwitchGlobalEmotes, the words differ per channel, so
+  // there's no shared-fetch caller pattern here - each channel fetches and syncs its own.
+  async syncTwitchChannelEmotes(channel, words) {
+    return this.syncEmoteSource(channel, 'twitch-channel', words);
   }
 
   async recordUserIdentity(userId, userName, timestamp) {

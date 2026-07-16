@@ -14,6 +14,7 @@
 // per-channel cooldown.
 const { syncChannelEmoteSet } = require('../sevenTv/SevenTvEmotes.js');
 const { syncGlobalEmotes } = require('./globalEmotes.js');
+const { syncChannelEmotes } = require('./channelEmotes.js');
 const ChatStats = require('../db/chatStats.js');
 
 const RESYNC_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -31,11 +32,12 @@ function getState(login) {
 }
 
 // The canonical sync chain (hoisted from index.js's startup loop). Twitch's global emotes
-// FIRST, then the channel's own 7TV set: the whitelist's unique key is {channel, word}, so on
-// a name collision the later sync owns the row, and a channel-specific emote is the more
-// meaningful attribution. The prune only runs when BOTH syncs succeeded (a failed fetch
-// rejects before it), so a transient API outage can never make it mistake still-tracked
-// emotes for orphans. Rejects on failure - callers decide whether that's fatal.
+// FIRST, then the broadcaster's own Twitch emotes, then the channel's own 7TV set LAST: the
+// whitelist's unique key is {channel, word}, so on a name collision the later sync owns the
+// row, and a 7TV set - the most deliberately curated of the three - is the most meaningful
+// attribution. The prune only runs when ALL THREE syncs succeeded (a failed fetch rejects
+// before it), so a transient API outage can never make it mistake still-tracked emotes for
+// orphans. Rejects on failure - callers decide whether that's fatal.
 async function syncNow(channelLogin) {
   const state = getState(channelLogin);
   // Owned here (not in maybeSyncOnLiveTick) so the startup call marks itself in-flight too -
@@ -45,6 +47,7 @@ async function syncNow(channelLogin) {
   try {
     const channel = `#${channelLogin}`;
     await syncGlobalEmotes(channel);
+    await syncChannelEmotes(channel);
     await syncChannelEmoteSet(channel);
     await ChatStats.pruneUntrackedEmoteStats(channel);
     const now = Date.now();

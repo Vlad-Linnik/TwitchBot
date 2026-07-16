@@ -208,13 +208,12 @@ async function updateSevenTvEmotes(client, channel, userState, message) {
     lastUpdateSevenTv.set(channel, Date.now());
   } else { return 1; }
 
-  if (!settings.sevenTv?.emoteSetUrl) {
-    client.say(channel, `7TV сет не настроен для этого канала VoHiYo `, userState["id"]);
-    return 1;
-  }
-
   try {
-    const { words } = await syncChannelEmoteSet(channel);
+    const result = await syncChannelEmoteSet(channel);
+    if (!result) {
+      client.say(channel, `К этому каналу не привязан 7TV-аккаунт VoHiYo `, userState["id"]);
+      return 1;
+    }
     // Same follow-up the startup/scheduled sync chain does: emotes dropped from the set get
     // their words/WordLifetimeStats rows pruned so they leave the web emote cloud. Safe here
     // even though only the 7TV half re-synced - the whitelist still holds the startup-synced
@@ -222,7 +221,7 @@ async function updateSevenTvEmotes(client, channel, userState, message) {
     // semantics hold. This manual path deliberately does NOT touch emoteSyncScheduler's
     // 3-per-24h cap; it is governed by its own per-channel cooldownMs instead.
     await ChatStats.pruneUntrackedEmoteStats(channel);
-    client.say(channel, `7TV эмоуты обновлены: ${words.length} ✅`, userState["id"]);
+    client.say(channel, `7TV эмоуты обновлены: ${result.words.length} ✅`, userState["id"]);
   } catch (err) {
     console.error('[7TV] Manual update failed:', err.message);
     client.say(channel, `ошибка обновления 7TV VoHiYo `, userState["id"]);
