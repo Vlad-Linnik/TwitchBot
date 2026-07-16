@@ -21,6 +21,7 @@ const Twitch_ban_API = require("../twitch/TwitchBanAPI.js");
 const Normalization = require("../shared/Normalization.js");
 const channelSettings = require("../config/channelSettings.js");
 const { syncChannelEmoteSet } = require("../sevenTv/SevenTvEmotes.js");
+const Clips = require("../twitch/clips.js");
 
 // timers - per-channel maps so a cooldown in one channel doesn't block another;
 // cooldown durations themselves come from that channel's settings.
@@ -31,6 +32,7 @@ var lastCountUserMsg = new Map();
 var lastcountUnique = new Map();
 var lastDirectMSG = new Map();
 var lastUpdateSevenTv = new Map();
+var lastRandomClip = new Map();
 
 // utilities
 var possible_periods = ["day", "week", "month", "all"];
@@ -229,6 +231,31 @@ async function updateSevenTvEmotes(client, channel, userState, message) {
 }
 
 
+async function randomClip(client, channel, userState, message) {
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.randomclip.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'randomclip'))) return 0;
+  if (isTimerReady(lastRandomClip.get(channel) || 0, settings.commands.randomclip.cooldownMs)) {
+    lastRandomClip.set(channel, Date.now());
+  } else { return 1; }
+
+  const broadcasterId = botInitInfo.channels[channelSettings.normalizeChannel(channel)]?.id;
+  if (!broadcasterId) return 1;
+
+  try {
+    const clip = await Clips.getRandomClip(broadcasterId);
+    if (!clip) {
+      client.say(channel, `клипов не найдено VoHiYo `, userState["id"]);
+      return 1;
+    }
+    client.say(channel, `🎬 ${clip.title} — ${clip.url}`, userState["id"]);
+  } catch (err) {
+    console.error('[Clips] Failed to fetch random clip:', err.message);
+    client.say(channel, `ошибка получения клипа VoHiYo `, userState["id"]);
+  }
+  return 1;
+}
+
 async function execCommands(client, channel, userState, message) {
   const commandCheck = [
     muteDuel,
@@ -237,11 +264,12 @@ async function execCommands(client, channel, userState, message) {
   ];
   const asyncCommandsCheck = [
     customCommands.getAllCustomCommands,
-    get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,
+    get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,randomClip,
     customCommands.addCommand,
     customCommands.deleteCustomCommand,
     customCommands.setCommandTimer,
     customCommands.setCommandPin,
+    customCommands.setCommandAnnounce,
     customCommands.exex_custom_command,
     counter.addCounter,
     counter.deleteCounter,
