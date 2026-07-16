@@ -56,7 +56,7 @@ To prevent this, each counter enforces its own cooldown (`commands.counterUpdate
 
 | Command | Access | Description |
 |---|---|---|
-| `!update7tv` | mod | Re-fetch the channel's configured 7TV emote set (`sevenTv.emoteSetUrl` in channel config) and sync it into the whitelist used for `!topsmiles` tracking — adds new emotes, removes ones no longer in the set (their accumulated emote stats are pruned so they leave the web emote cloud; a brand-new emote's previously-counted word-cloud rows are purged too). Previously manually-tracked words (from the removed `!addword` command) are unaffected. The bot also re-syncs automatically: at startup, and while the stream is live — on stream start plus every 4 hours, capped at 3 scheduled syncs per 24h. |
+| `!update7tv` | mod | Re-fetch the channel's 7TV emote set — auto-resolved from the channel's Twitch account (no configuration needed; the reply says so if no 7TV account is linked) — and sync it into the whitelist used for `!topsmiles` tracking — adds new emotes, removes ones no longer in the set (their accumulated emote stats are pruned so they leave the web emote cloud; a brand-new emote's previously-counted word-cloud rows are purged too). Previously manually-tracked words (from the removed `!addword` command) are unaffected. The bot also re-syncs automatically (7TV set + the broadcaster's own Twitch sub/bits emotes): at startup, and while the stream is live — on stream start plus every 4 hours, capped at 3 scheduled syncs per 24h. |
 
 Banned-word/obfuscated-spam messages are auto-timed-out (escalating duration) with no command needed; known spam signatures trigger an immediate ban.
 

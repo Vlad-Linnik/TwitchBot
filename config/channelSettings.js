@@ -13,9 +13,6 @@ const DEFAULT_CHANNEL_SETTINGS = {
   },
   spamSignatures: ["example_spam_signature"],
   spamBanReason: "spam bot",
-  sevenTv: {
-    emoteSetUrl: "",
-  },
   commands: {
     topchatters: { enabled: true, cooldownMs: 15000, signature: "!topchatters" },
     topsmiles: { enabled: true, cooldownMs: 15000, signature: "!topsmiles" },
@@ -51,7 +48,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
 // login -> { settings, expiresAt }
 const settingsCache = new Map();
 const bannedWordsRegexCache = new Map();
-const refreshing = new Map(); // login -> in-flight refresh promise (dedupes AND lets getSettingsFresh await it)
+const refreshing = new Map(); // login -> in-flight refresh promise (dedupes concurrent refreshFromMongo calls)
 let channelConfigCollection;
 
 function normalizeChannel(channel) {
@@ -125,21 +122,6 @@ function getSettings(channel) {
   return cached.settings;
 }
 
-// Awaitable variant for the few callers that must see the channel's REAL ChannelConfig doc
-// rather than the possibly-still-default synchronous cache. The emote sync is the motivating
-// case: at startup the very first getSettings() call returns bare defaults (empty
-// sevenTv.emoteSetUrl) while the Mongo read happens in the background, which made the startup
-// 7TV sync silently skip the channel. Message handlers should keep using getSettings() -
-// never block chat on a DB round-trip.
-async function getSettingsFresh(channel) {
-  const login = normalizeChannel(channel);
-  const cached = settingsCache.get(login);
-  if (!cached || Date.now() >= cached.expiresAt) {
-    await refreshFromMongo(login);
-  }
-  return settingsCache.get(login).settings;
-}
-
 function escapeRegExp(word) {
   return word.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
 }
@@ -178,7 +160,6 @@ function reload() {
 
 module.exports = {
   getSettings,
-  getSettingsFresh,
   getBannedWordsRegex,
   getCommandSignatureRegex,
   getCommandSignatureArgRegex,
