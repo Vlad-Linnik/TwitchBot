@@ -10,9 +10,13 @@ Signatures shown are the defaults from `config/channelSettings.js`'s `DEFAULT_CH
 | `!delcommand !name` | mod | Delete a custom command. |
 | `!settimer !name <seconds>\|off` | mod | Auto-post that command's text every `<seconds>` seconds (minimum 60); `off` disables auto-posting. Commands sharing an identical interval are spread evenly across it so they don't fire together. A manual `!name` trigger in chat resets that command's auto-post clock. An auto-post only actually fires when the stream is live (skipped in debug mode, see `DEBUG_MODE` in `.env`) and at least `commands.customCommandTimer.minMessagesBetween` ordinary chat messages (default 10, configurable per channel) have happened since the last auto-post — this also guarantees no two auto-posts land back-to-back. |
 | `!setpin !name on\|off` | mod | Toggle auto-pin: when on, every send of that command (manual trigger or timer auto-post) pins the sent message via Twitch's chat pin, staying pinned until the stream ends (replacing any message already pinned). Since only mods can pin, a pin-enabled command can only be triggered by mods — non-mods' `!name` is silently ignored. A command can't have `timer` and `pin` on at the same time — `!settimer`/`!setpin` reject the change with an explanation if the other attribute is already active; disable it first. |
-| `!setannounce !name on\|off` | mod | Toggle sending that command as a Twitch chat announcement (a colored, highlighted system-style message) instead of a plain message — works for both manual triggers and timer auto-posts. The color is configured on the TwitchBot-Web `/<channel>/commands` page (default: primary). Mutually exclusive with `pin` (an announcement is a self-contained send with no message ID to pin) — `!setpin`/`!setannounce` reject the change if the other is already active. If the bot's token lacks the `moderator:manage:announcements` scope, the send falls back to a plain message instead of failing silently. |
+| `!setannounce !name on\|off` | mod | Toggle sending that command as a Twitch chat announcement (a colored, highlighted system-style message) instead of a plain message — works for both manual triggers and timer auto-posts. Like `pin`, an announce-enabled command can only be manually triggered by mods — non-mods' `!name` is silently ignored (auto-posts are unaffected, since there's no triggering user to gate). The color is configured on the TwitchBot-Web `/<channel>/commands` page (default: primary). Mutually exclusive with `pin` (an announcement is a self-contained send with no message ID to pin) — `!setpin`/`!setannounce` reject the change if the other is already active. If the bot's token lacks the `moderator:manage:announcements` scope, the send falls back to a plain message instead of failing silently. |
 | `!customcommands` | all | List all custom command names for the channel. |
-| `!name` | all (mod-only if auto-pin is on for that command) | Trigger a custom command (`#counterName` inside its text is replaced with the counter's live value). |
+| `!name` | all (mod-only if auto-pin or announce is on for that command) | Trigger a custom command (`#counterName` inside its text is replaced with the counter's live value). |
+
+Two more per-command settings exist but are **web-panel-only** — there's no chat command for either, same as the announcement color (`TwitchBot-Web`'s `/<channel>/commands` page):
+- **Enabled/disabled**: a disabled command is inert in chat — a manual `!name` trigger no longer matches it (falling through as if it didn't exist) and its auto-post timer, if any, stops firing (but keeps ticking, so re-enabling resumes on schedule without a restart).
+- **Text by stream category**: a command can have different response text for specific Twitch stream categories (e.g. a different `!совет`-style response while playing "Dota 2" vs. anything else), falling back to the command's plain text outside those categories. Matched case-insensitively against the category name tracked by `twitch/streamStatus.js` (see its "Get Streams poll" — same source as `!совет`'s Dota-2 gate).
 
 ## Counters
 
@@ -49,7 +53,7 @@ To prevent this, each counter enforces its own cooldown (`commands.counterUpdate
 | `!countword <word>` | all | How many times `<word>` was said today. |
 | `!countmsg [period]` | all | Your message count and rank for the period. |
 | `!countunique [period]` | all | Count of unique chatters for the period. |
-| `!botinfo` | mod | Bot uptime and DB stats summary. |
+| `!botinfo` | mod | Bot uptime. |
 | `!randomclip` | all | Posts a random clip from the channel's top 100 most-viewed clips (Twitch Helix Get Clips). |
 
 ## Moderation
@@ -66,7 +70,7 @@ Banned-word/obfuscated-spam messages are auto-timed-out (escalating duration) wi
 |---|---|---|
 | `!muteduel [@user] [seconds]` | all | Challenge chat or a specific user to a dice-roll duel; loser gets timed out (default 300s, min 300s, max 2 weeks). |
 | `!muteaccept` | all | Accept a pending mute duel. |
-| `!совет` | all | Get a random (expensive) Dota 2 item suggestion. |
+| `!совет` | all | Get a random (expensive) Dota 2 item suggestion. Only responds while the channel's stream category is "Dota 2" (tracked via the same Get Streams poll `ActivitiTracker.js` already uses for live status, up to ~5 minutes stale). |
 
 ## Talking to the bot
 

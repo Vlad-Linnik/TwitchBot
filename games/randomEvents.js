@@ -2,6 +2,9 @@ const { isTimerReady } = require("../shared/timer.js");
 const { dota2Items } = require("./dota2Items.js");
 const randomEventTimeDelay = 3 * 60 * 1000; //3 minutes deley
 const botInitInfo = require("../botInitInfo.js");
+const streamStatus = require("../twitch/streamStatus.js");
+
+const DOTA2_CATEGORY = "Dota 2";
 
 var lastRandomDota2ItemTime = new Map();
 var lastMaaaanEventTime = new Map();
@@ -42,15 +45,17 @@ function randomEventsAndThings(client, channel, userState, message) {
 }
 
 function getDota2RandomItem(client, channel, userState, message) {
-  if (
-    message.match(/!совет/) &&
-    isTimerReady(lastRandomDota2ItemTime.get(channel), randomEventTimeDelay)
-  ) {
+  if (!message.match(/!совет/)) return 0;
+
+  const broadcasterId = botInitInfo.channels[channel.replace(/^#/, "")]?.id;
+  if (streamStatus.getCategory(broadcasterId) !== DOTA2_CATEGORY) return 0;
+
+  if (isTimerReady(lastRandomDota2ItemTime.get(channel), randomEventTimeDelay)) {
     lastRandomDota2ItemTime.set(channel, new Date().getTime());
     client.say(channel, `Советую собрать ${dota2Items["Expensive"].random()}`);
     return 1;
   }
-  return 0;
+  return 1;
 }
 module.exports = {
   randomEventsAndThings: randomEventsAndThings,
