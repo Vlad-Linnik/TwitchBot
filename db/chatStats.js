@@ -581,6 +581,10 @@ class ChatStats {
           pin: command["pin"] || false,
           announce: command["announce"] || false,
           announceColor: command["announceColor"] || "primary",
+          // enabled/categoryTexts are web-panel-only (TwitchBot-Web's /<channel>/commands) - chat
+          // has no command that sets either, so a doc predating this feature just gets the defaults.
+          enabled: command["enabled"] !== false,
+          categoryTexts: command["categoryTexts"] || [],
         };
     }
     return CommandsDict;
@@ -588,7 +592,7 @@ class ChatStats {
 
   async addNewCustomCommand(channel, command, result, timer = null, pin = false, announce = false, announceColor = "primary") {
     await this.ensureInitialized();
-    this.customCommandsCollection.insertOne({channel, command, result, timer, pin, announce, announceColor})
+    this.customCommandsCollection.insertOne({channel, command, result, timer, pin, announce, announceColor, enabled: true, categoryTexts: []})
       .catch(err => console.error('[DB] addNewCustomCommand error:', err));
   }
 
@@ -600,7 +604,7 @@ class ChatStats {
       .catch(err => console.error('[DB] deleteCustomCommand error:', err));
   }
 
-  async editCustomCommand(channel, command, new_result, new_timer = null, new_pin = false, new_announce = false, new_announceColor = "primary") {
+  async editCustomCommand(channel, command, new_result, new_timer = null, new_pin = false, new_announce = false, new_announceColor = "primary", new_enabled = true, new_categoryTexts = []) {
     await this.ensureInitialized();
     this.customCommandsCollection.updateOne({channel:channel, command:command},
     {
@@ -610,7 +614,9 @@ class ChatStats {
         timer: new_timer,
         pin: new_pin,
         announce: new_announce,
-        announceColor: new_announceColor
+        announceColor: new_announceColor,
+        enabled: new_enabled,
+        categoryTexts: new_categoryTexts
       }
     }).catch(err => console.error('[DB] editCustomCommand error:', err));
   }

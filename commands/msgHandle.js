@@ -56,10 +56,19 @@ async function spam_protection(client, channel, userState, message) {
     return 0;
   }
   const settings = channelSettings.getSettings(channel);
-  for (const signature of settings.spamSignatures) {
-    if (Normalization.detectObfuscatedSignature(message, signature)) {
+  for (const raw of settings.spamSignatures) {
+    // A signature used to be a bare string, always resulting in a permanent ban with the shared
+    // spamBanReason - a doc predating the per-signature duration/reason feature (TwitchBot-Web's
+    // lib/spamSignatureValidation.js) still means exactly that, without a separate migration.
+    const signature = typeof raw === "string" ? { word: raw, durationSeconds: null, reason: null } : raw;
+    if (Normalization.detectObfuscatedSignature(message, signature.word)) {
       if (replyIfBotLacksMod(client, channel, userState, settings)) return 1;
-      Twitch_ban_API.ban(userState["user-id"], userState["room-id"], settings.spamBanReason || "spam bot");
+      const reason = signature.reason || settings.spamBanReason || "spam bot";
+      if (signature.durationSeconds) {
+        Twitch_ban_API.timeout(userState["user-id"], signature.durationSeconds, userState["room-id"], reason);
+      } else {
+        Twitch_ban_API.ban(userState["user-id"], userState["room-id"], reason);
+      }
       return 1;
     }
   }
