@@ -5,6 +5,11 @@ var lastQuestionTime = new Map();
 for (channel of Object.keys(botInitInfo.channels)) {
   lastQuestionTime.set("#" + channel, 0);
 }
+
+// See games/isInsult.js's addChannel - same reason, same fix.
+function addChannel(channel) {
+  if (!lastQuestionTime.has(channel)) lastQuestionTime.set(channel, 0);
+}
 function question(client, channel, userState, message) {
   if (message.includes("?")) {
     const settings = channelSettings.getSettings(channel);
@@ -25,4 +30,5 @@ function question(client, channel, userState, message) {
 
 module.exports = {
   question,
+  addChannel,
 };

@@ -12,6 +12,15 @@ for (channel of Object.keys(botInitInfo.channels)) {
   extraTime.set("#" + channel, 0);
 }
 
+// Seeds this module's per-channel state for a channel joined after boot (see
+// twitch/channelJoinScheduler.js) - without this, isTimerReady(undefined, ...) is permanently
+// false for that channel, silently disabling insult detection on it until a restart.
+function addChannel(channel) {
+  if (lastInsultTime.has(channel)) return;
+  lastInsultTime.set(channel, 0);
+  extraTime.set(channel, 0);
+}
+
 function isInsult(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.insult.enabled) return 0;
@@ -46,3 +55,4 @@ function isInsult(client, channel, userState, message) {
 }
 
 exports.isInsult = isInsult;
+exports.addChannel = addChannel;

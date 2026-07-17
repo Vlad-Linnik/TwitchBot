@@ -10,6 +10,13 @@ for (channel of Object.keys(botInitInfo.channels)) {
   lastMaaaanEventTime.set("#" + channel, 0);
 }
 
+// See games/isInsult.js's addChannel - same reason, same fix.
+function addChannel(channel) {
+  if (lastRandomDota2ItemTime.has(channel)) return;
+  lastRandomDota2ItemTime.set(channel, 0);
+  lastMaaaanEventTime.set(channel, 0);
+}
+
 function randomEventsAndThings(client, channel, userState, message) {
   var random_things = ["+", "я", "Я", "ну я", "ну, я", "ну Я", "Ну я"];
   if (random_things.includes(message)) {
@@ -48,4 +55,5 @@ function getDota2RandomItem(client, channel, userState, message) {
 module.exports = {
   randomEventsAndThings: randomEventsAndThings,
   getDota2RandomItem: getDota2RandomItem,
+  addChannel,
 };

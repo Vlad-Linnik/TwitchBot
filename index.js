@@ -18,6 +18,7 @@ async function bootstrap() {
   const moderators = require('./twitch/moderators.js');
   const { customCommands } = require('./commands/CustomCommands.js');
   const emoteSyncScheduler = require('./twitch/emoteSyncScheduler.js');
+  const channelJoinScheduler = require('./twitch/channelJoinScheduler.js');
 
   // bot settings
   const opts = {
@@ -138,7 +139,10 @@ async function bootstrap() {
         .catch(err => console.error(`[Emotes] Sync failed for #${channel}:`, err.message));
     }
     customCommands.startCommandTimers(client);
-    client.connect();
+    await client.connect();
+    // Picks up channels registered/enabled AFTER this boot (scripts/seedChannel.js, or an
+    // approved /request-bot request) without needing a restart - see channelJoinScheduler.js.
+    channelJoinScheduler.start(client);
   }
 
   await start();
