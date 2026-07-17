@@ -49,6 +49,25 @@ class Counter {
     }
   }
 
+  // Brings a channel joined after boot (see twitch/channelJoinScheduler.js) up to the same state
+  // the constructor gives every channel known at startup. Without this, counters/counterAccess/
+  // counterKeysList have no entry for the channel and substituteCounters/updateCounter throw the
+  // first time chat mentions a #counter there. No-op if the channel is already tracked.
+  addChannel = async (channel) =>
+  {
+    if (this.channelsList.includes(channel)) return;
+    this.channelsList.push(channel);
+    const counters = await ChatStats.getAllCounters(channel);
+    this.counters[channel] = {};
+    this.counterAccess[channel] = {};
+    for (const [name, data] of Object.entries(counters)) {
+      this.counters[channel][name] = data.count;
+      this.counterAccess[channel][name] = data.access;
+    }
+    this.counterKeysList[channel] = Object.keys(this.counters[channel]).sort((a, b) => b.length - a.length);
+    this.customCommandExceptions[channel] = new Set(await ChatStats.getCustomCommandExceptions(channel));
+  }
+
   // Picks up counter edits made OUTSIDE this process - the TwitchBot-Web panel's
   // /<channel>/counters page writes the same `counters` collection. Called from
   // CustomCommands.refreshFromDatabase on its 10s tick. Overwriting the in-memory
@@ -704,6 +723,23 @@ class CustomCommands {
       return 1;
     }
     return 0;
+  }
+
+  // Brings a channel joined after boot (see twitch/channelJoinScheduler.js) up to the same
+  // state the constructor gives every channel known at startup: without an entry in
+  // CommandsDict/CommandsKeysList, exex_custom_command's `for (const cmd of
+  // this.CommandsKeysList[channel])` throws on the very first !-prefixed message from that
+  // channel. If timers are already running (startCommandTimers was called), also schedules this
+  // channel's auto-sends so a command with a timer doesn't just sit inert until the next
+  // refreshFromDatabase tick notices it. No-op if the channel is already tracked.
+  addChannel = async (channel) =>
+  {
+    if (this.channelsList.includes(channel)) return;
+    this.channelsList.push(channel);
+    this.CommandsDict[channel] = await ChatStats.getAllCommands(channel);
+    this.CommandsKeysList[channel] = Object.keys(this.CommandsDict[channel]).sort((a, b) => b.length - a.length);
+    this.messagesSinceLastAuto[channel] = 0;
+    if (this.client) this.scheduleChannelCommands(channel);
   }
 
 

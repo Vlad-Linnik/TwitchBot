@@ -39,6 +39,14 @@ for (const channel of Object.keys(botInitInfo.channels)) {
   muteDuelInfo.set(channelName, initializeMuteDuelInfo());
 }
 
+// Seeds this module's per-channel state for a channel joined after boot (see
+// twitch/channelJoinScheduler.js). Without this, muteDuelInfo.get(channel) returns undefined and
+// the very first !muteduel/!muteaccept in that channel throws instead of playing.
+function addChannel(channel) {
+  if (muteDuelInfo.has(channel)) return;
+  muteDuelInfo.set(channel, initializeMuteDuelInfo());
+}
+
 // Utility function to convert seconds into human-readable time
 function timeChanger(timeSeconds) {
   const timeUnits = ["секунд", "минут", "часов", "дней", "недель"];
@@ -203,5 +211,6 @@ function muteDuelAccept(client, channel, userState, message) {
 module.exports={
   muteDuel:muteDuel,
   muteDuelAccept:muteDuelAccept,
-  timeChanger: timeChanger
+  timeChanger: timeChanger,
+  addChannel,
 }
