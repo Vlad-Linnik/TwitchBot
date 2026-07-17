@@ -15,7 +15,6 @@ const { isTimerReady } = require("../shared/timer.js");
 const ChatStats = require('../db/chatStats.js');
 const botInitInfo = require("../botInitInfo.js");
 const {muteDuelAccept, muteDuel, timeChanger} = require("../games/muteDuel.js");
-const { spawn } = require('child_process');
 const {customCommands, counter} = require("./CustomCommands.js");
 const Twitch_ban_API = require("../twitch/TwitchBanAPI.js");
 const Normalization = require("../shared/Normalization.js");
