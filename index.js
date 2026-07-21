@@ -1,4 +1,5 @@
 require("./shared/logger.js");
+require("./shared/errorRingBuffer.js").install();
 const botInitInfo = require("./botInitInfo.js");
 const tmi = require("tmi.js");
 
@@ -19,6 +20,8 @@ async function bootstrap() {
   const { customCommands } = require('./commands/CustomCommands.js');
   const emoteSyncScheduler = require('./twitch/emoteSyncScheduler.js');
   const channelJoinScheduler = require('./twitch/channelJoinScheduler.js');
+  const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
+  const errorRingBuffer = require('./shared/errorRingBuffer.js');
 
   // bot settings
   const opts = {
@@ -72,9 +75,65 @@ async function bootstrap() {
     }
   };
 
+  // Connection-liveness watchdog. tmi.js's own ping/pong reconnect logic should catch a dropped
+  // connection on its own (~70s), but a genuinely zombied socket (TCP session dead at the network
+  // level with no close/error ever firing) can leave the process technically alive - and since pm2
+  // only restarts on process exit, that hangs forever until someone notices and restarts it by hand.
+  // lastActivityAt is updated by any of chat/pong/connected, so a channel with quiet chat doesn't
+  // false-positive: 'pong' alone keeps it fresh every ~60s as long as the connection is real.
+  let lastActivityAt = Date.now();
+  const markActivity = () => { lastActivityAt = Date.now(); };
+  client.on('pong', markActivity);
+  client.on('connected', () => {
+    markActivity();
+    console.log('[tmi] Connected to Twitch IRC.');
+  });
+  client.on('disconnected', (reason) => console.error('[tmi] Disconnected:', reason));
+  client.on('reconnect', () => console.error('[tmi] Reconnecting to Twitch IRC...'));
+
+  const HEARTBEAT_INTERVAL_MS = 30_000;
+  const WATCHDOG_STALE_MS = 5 * 60 * 1000;
+  const startedAt = new Date();
+  let prevCpuUsage = process.cpuUsage();
+  let prevCpuAt = Date.now();
+
+  setInterval(() => {
+    const now = Date.now();
+    const idleMs = now - lastActivityAt;
+    const stale = idleMs > WATCHDOG_STALE_MS;
+
+    const cpuDelta = process.cpuUsage(prevCpuUsage);
+    const elapsedMs = now - prevCpuAt;
+    const cpuPercent = elapsedMs > 0 ? ((cpuDelta.user + cpuDelta.system) / 1000 / elapsedMs) * 100 : 0;
+    prevCpuUsage = process.cpuUsage();
+    prevCpuAt = now;
+
+    botHeartbeatRepo.writeHeartbeat({
+      status: stale ? 'stale' : 'ok',
+      pid: process.pid,
+      startedAt,
+      updatedAt: new Date(now),
+      lastActivityAt: new Date(lastActivityAt),
+      connectedChannels: Object.keys(botInitInfo.channels),
+      memoryUsageMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      cpuPercent: Math.round(cpuPercent * 10) / 10,
+      recentErrors: errorRingBuffer.getRecent(),
+    }).catch((err) => console.error('[Heartbeat] write failed:', err.message));
+
+    // Self-restart rather than trying to nurse tmi.js's internal state back to health - a
+    // supervisor-level kill+respawn (pm2 picks this up as a normal process exit) is far more
+    // reliable than attempting to manually reconnect a client that may be stuck in an unknown
+    // internal state.
+    if (stale) {
+      console.error(`[Watchdog] No tmi.js activity for ${Math.round(idleMs / 1000)}s - connection appears dead. Exiting so pm2 restarts.`);
+      process.exit(1);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
   // main
   client.on("chat", async (channel, userState, message, self) => {
     const normalizedChannel = channel.toLowerCase().replace('#', '');
+    markActivity();
 
     // Don't listen to my own messages..
     if (self) return;
