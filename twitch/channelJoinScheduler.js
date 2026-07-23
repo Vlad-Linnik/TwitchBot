@@ -18,7 +18,7 @@
 const channelsRepo = require('../db/channelsRepo.js');
 const botInitInfo = require('../botInitInfo.js');
 const moderators = require('./moderators.js');
-const EventManager = require('./events.js');
+const eventSub = require('./events.js');
 const ActivityTracker = require('./ActivitiTracker.js');
 const emoteSyncScheduler = require('./emoteSyncScheduler.js');
 const { counter, customCommands } = require('../commands/CustomCommands.js');
@@ -42,11 +42,12 @@ async function joinChannel(client, login, channelId) {
   questionToThisBot.addChannel(channel);
   randomEvents.addChannel(channel);
 
-  // Same order/rationale as index.js's start(): moderator cache before EventManager/
-  // ActivityTracker so neither reads an empty cache while it loads; emote sync fire-and-forget
-  // so a slow/failed 7TV or Helix call can't delay the channel actually joining chat.
+  // Same order/rationale as index.js's start(): moderator cache before EventSub/ActivityTracker
+  // so neither reads an empty cache while it loads; emote sync fire-and-forget so a slow/failed
+  // 7TV or Helix call can't delay the channel actually joining chat. The EventSub subscription
+  // goes onto the bot's single shared socket (twitch/events.js) rather than a new one.
   await moderators.loadFromDatabase(channelId);
-  new EventManager(`${channelId}`, channel).connect();
+  eventSub.addChannel(channelId, channel);
   new ActivityTracker(channelId, channel).start();
   emoteSyncScheduler.syncNow(channel)
     .catch(err => console.error(`[ChannelJoin] Emote sync failed for ${channel}:`, err.message));
