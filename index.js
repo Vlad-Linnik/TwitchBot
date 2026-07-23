@@ -14,7 +14,7 @@ async function bootstrap() {
   const ChatStats = require('./db/chatStats.js');
   const axios = require('axios');
   const TokenManager = require('./twitch/TokenManager.js');
-  const EventManager = require('./twitch/events.js');
+  const eventSub = require('./twitch/events.js');
   const ActivityTracker = require('./twitch/ActivitiTracker.js');
   const moderators = require('./twitch/moderators.js');
   const { customCommands } = require('./commands/CustomCommands.js');
@@ -181,10 +181,11 @@ async function bootstrap() {
     await require('./config/knownBots.js').resolveKnownBotIds();
     for (let channel of Object.keys(botInitInfo.channels)) {
       // Seed the in-memory moderator cache from the DB before anything else for this channel
-      // starts, so EventManager/ActivityTracker never read an empty cache while it loads.
+      // starts, so eventSub/ActivityTracker never read an empty cache while it loads.
       await moderators.loadFromDatabase(botInitInfo.channels[channel].id);
-      TwitchEvent = new EventManager(`${botInitInfo.channels[channel].id}`, channel);
-      TwitchEvent.connect();
+      // One shared EventSub socket for every channel - see twitch/events.js for why per-channel
+      // sockets broke past the 3rd channel.
+      eventSub.addChannel(botInitInfo.channels[channel].id, channel);
       ModsActivitiTracker = new ActivityTracker(botInitInfo.channels[channel].id, channel);
       ModsActivitiTracker.start();
       // Startup emote sync (globals -> 7TV -> prune; ordering rationale lives in
