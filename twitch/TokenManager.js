@@ -1,6 +1,7 @@
 const path = require('path');
 const axios = require('axios');
 const botInitInfo = require("../botInitInfo.js");
+const describeError = require('../shared/describeError.js');
 const fs = require('fs');
 
 function updateEnvVariable(key, value) {
@@ -36,14 +37,19 @@ class TokenManager {
             "UserToken": null,
             "AppToken": null
         };
-        
+
+        // The tmi.js client, so a token refreshed mid-run reaches the IRC connection too - see
+        // refreshUserToken. start() used to be handed this and drop it on the floor.
+        this.client = null;
+
         this.func_list = {
             "UserToken": this.refreshUserToken.bind(this),
             "AppToken": this.getAppAccessToken.bind(this)
         };
     }
 
-    async start() {
+    async start(client) {
+        this.client = client || null;
         await this.execFunction("UserToken");
         await this.execFunction("AppToken");
     }
@@ -66,11 +72,20 @@ class TokenManager {
             
             botInitInfo.settings['password'] = response.data.access_token;
             updateEnvVariable('password', response.data.access_token);
+
+            // tmi.js re-reads opts.identity.password on every connection attempt (_getToken, see
+            // node_modules/tmi.js/lib/client.js:1209), so keeping this current means a reconnect
+            // after a refresh authenticates with the NEW token. Without it the client kept
+            // whatever password was copied in at boot - and once that expired, tmi.js's "Login
+            // unsuccessful" path sets its own `reconnect = false` PERMANENTLY (client.js:662-664),
+            // so it stops retrying entirely and the process idles until the watchdog kills it.
+            if (this.client) this.client.opts.identity.password = response.data.access_token;
+
             this.timer.UserToken = response.data.expires_in * 1000; // convert to milisec
             console.log(`[TokenManager] User Token updated!`);
         } catch (error) {
-            console.error('Error User Token:', error.response?.data || error.message);
-            this.timer.UserToken = 60000; 
+            console.error('[TokenManager] Error User Token:', describeError(error));
+            this.timer.UserToken = 60000;
         }
     }
 
@@ -87,7 +102,7 @@ class TokenManager {
             this.timer.AppToken = response.data.expires_in * 1000;
             console.log(`[TokenManager] App Token updeted!`);
         } catch (error) {
-            console.error('Error App token:', error.response?.data || error.message);
+            console.error('[TokenManager] Error App token:', describeError(error));
             this.timer.AppToken = 60000;
         }
     }
@@ -96,7 +111,7 @@ class TokenManager {
         try {
             await this.func_list[funcName]();
         } catch (error) {
-            console.error(`[Error] ${funcName}:`, error.message);
+            console.error(`[TokenManager] [Error] ${funcName}:`, describeError(error));
         }
         let delay = this.timer[funcName] - 60000;
         const MAX_TIMEOUT = 20 * 24 * 60 * 60 * 1000; // 20 Days in milsec

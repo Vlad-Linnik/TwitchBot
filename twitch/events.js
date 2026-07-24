@@ -74,7 +74,10 @@ class EventSubClient {
             this.reconnectTimer = null;
         }
 
-        const socket = new WebSocket(url);
+        // Same reasoning as the axios timeout in botInitInfo.js: without this, a handshake that
+        // stalls at the network level hangs with no 'error' and no 'close', so nothing ever
+        // schedules a retry and EventSub stays silently down for the whole process lifetime.
+        const socket = new WebSocket(url, { handshakeTimeout: 15000 });
         this.ws = socket;
         // A handoff's new session inherits the old one's subscriptions, so its welcome must NOT
         // re-subscribe (that's a guaranteed 409). Any other connect starts from nothing.

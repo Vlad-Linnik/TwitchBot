@@ -1,6 +1,20 @@
 require('dotenv').config();
+const axios = require('axios');
 const startTime = new Date();
 const channelsRepo = require('./db/channelsRepo.js');
+
+// Node's HTTP client has NO default timeout, and neither does axios: a request that stalls at the
+// network level (a flaky route to Twitch, a DNS hiccup) blocks until the OS gives up - about 130s
+// on Linux with the default tcp_syn_retries=6. That is not a theoretical concern here. On
+// 2026-07-24 two such stalls inside TokenManager.start() alone stretched startup to ~280s, which
+// collided with index.js's 5-minute watchdog: the process was killed before tmi.js ever connected,
+// pm2 restarted it, and it stalled again - a loop that could not break itself. Every Twitch/7TV
+// call in this bot is a small REST request that answers in well under a second when the network is
+// healthy, so a bounded failure is strictly better than an unbounded wait.
+// axios is a module singleton, so setting this once here covers every caller in the process, and
+// every entry point (index.js and scripts/) requires this module.
+const HTTP_TIMEOUT_MS = 15000;
+axios.defaults.timeout = HTTP_TIMEOUT_MS;
 
 
 const settings = {

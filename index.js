@@ -22,6 +22,7 @@ async function bootstrap() {
   const channelJoinScheduler = require('./twitch/channelJoinScheduler.js');
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
+  const describeError = require('./shared/describeError.js');
 
   // bot settings
   const opts = {
@@ -70,7 +71,7 @@ async function bootstrap() {
       if (opts.options.debug) console.log(`[API] msg sendet to #${normalizedChannel}`);
       return response.data?.data?.[0]?.message_id ?? null;
     } catch (error) {
-      console.error('[API] Error msg:', error.response?.data || error.message);
+      console.error('[API] Error msg:', describeError(error));
       return null;
     }
   };
@@ -82,9 +83,13 @@ async function bootstrap() {
   // lastActivityAt is updated by any of chat/pong/connected, so a channel with quiet chat doesn't
   // false-positive: 'pong' alone keeps it fresh every ~60s as long as the connection is real.
   let lastActivityAt = Date.now();
+  // Until tmi.js has connected even once there is no connection to call dead - see the two
+  // deadlines below.
+  let hasConnected = false;
   const markActivity = () => { lastActivityAt = Date.now(); };
   client.on('pong', markActivity);
   client.on('connected', () => {
+    hasConnected = true;
     markActivity();
     console.log('[tmi] Connected to Twitch IRC.');
   });
@@ -93,6 +98,16 @@ async function bootstrap() {
 
   const HEARTBEAT_INTERVAL_MS = 30_000;
   const WATCHDOG_STALE_MS = 5 * 60 * 1000;
+  // Startup gets its own, much longer deadline, because before the first connection the idle
+  // check above isn't measuring a dead connection - it's measuring how long startup is taking,
+  // and killing a process for being slow to start is how a temporary problem becomes a permanent
+  // one. That's not hypothetical: on 2026-07-24 two un-timed-out token requests stalled ~130s
+  // each (fixed with axios.defaults.timeout in botInitInfo.js), startup ran ~280s, and this
+  // watchdog fired at 300s just before client.connect() finished - over and over, with pm2
+  // dutifully restarting into the same wall. A process genuinely wedged before connecting still
+  // needs the restart, hence a deadline rather than none, and a distinct message so the two
+  // failures are never confused again in a log.
+  const STARTUP_DEADLINE_MS = 15 * 60 * 1000;
   const startedAt = new Date();
   let prevCpuUsage = process.cpuUsage();
   let prevCpuAt = Date.now();
@@ -100,7 +115,8 @@ async function bootstrap() {
   setInterval(() => {
     const now = Date.now();
     const idleMs = now - lastActivityAt;
-    const stale = idleMs > WATCHDOG_STALE_MS;
+    const stale = hasConnected && idleMs > WATCHDOG_STALE_MS;
+    const startupStalled = !hasConnected && (now - startedAt.getTime()) > STARTUP_DEADLINE_MS;
 
     const cpuDelta = process.cpuUsage(prevCpuUsage);
     const elapsedMs = now - prevCpuAt;
@@ -109,7 +125,7 @@ async function bootstrap() {
     prevCpuAt = now;
 
     botHeartbeatRepo.writeHeartbeat({
-      status: stale ? 'stale' : 'ok',
+      status: stale || startupStalled ? 'stale' : 'ok',
       pid: process.pid,
       startedAt,
       updatedAt: new Date(now),
@@ -126,6 +142,10 @@ async function bootstrap() {
     // internal state.
     if (stale) {
       console.error(`[Watchdog] No tmi.js activity for ${Math.round(idleMs / 1000)}s - connection appears dead. Exiting so pm2 restarts.`);
+      process.exit(1);
+    }
+    if (startupStalled) {
+      console.error(`[Watchdog] tmi.js never connected within ${Math.round((now - startedAt.getTime()) / 1000)}s of startup - exiting so pm2 restarts.`);
       process.exit(1);
     }
   }, HEARTBEAT_INTERVAL_MS);
@@ -173,8 +193,9 @@ async function bootstrap() {
 
   // startup
   async function start() {
+    // TokenManager owns client.opts.identity.password from here on - it sets it on every
+    // successful refresh, not just this first one, so a reconnect hours later uses a live token.
     await TokenManager.start(client);
-    client.opts.identity.password = botInitInfo.settings["password"];
     // Resolve known bot logins -> ids (config/knownBots.js) so ChatStats can skip their
     // ModeratorStatistics/ModUpTimeStats writes. After TokenManager.start so the app token
     // its Helix lookup needs already exists; non-fatal on failure by design.
