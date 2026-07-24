@@ -116,6 +116,8 @@ class ModActivityTracker {
                     console.log(`[ModTracker] [${this.channelLogin}] Stream is offline`);
                     this.isLive = false;
                     this.recordDailyModeratorStats(currentModerators);
+                    ChatStats.endStreamSession(this.broadcasterId, new Date(now))
+                        .catch(err => console.error('[ModTracker] endStreamSession error:', err));
                 }
                 // Don't let an offline gap get counted as activity time once the stream comes back.
                 this.lastCheckTime = null;
@@ -129,6 +131,15 @@ class ModActivityTracker {
                 this.lastHourlyStatsAt = 0; // get today's row on the board promptly, not up to an hour late
             }
             this.isLive = true;
+
+            // Piggyback the viewer/category history collector on this same poll - see
+            // ChatStats.ensureOpenSession/recordStreamSample. staleAfterMs = 3x the poll interval:
+            // long enough that one missed/slow tick never falsely orphans a genuinely-live
+            // session, short enough to catch a real bot-down gap well before the next stream.
+            ChatStats.ensureOpenSession(this.broadcasterId, this.channelLogin, new Date(now), this.intervalMs * 3)
+                .catch(err => console.error('[ModTracker] ensureOpenSession error:', err));
+            ChatStats.recordStreamSample(this.broadcasterId, new Date(now), streamInfo.viewer_count, streamInfo.game_name || null)
+                .catch(err => console.error('[ModTracker] recordStreamSample error:', err));
 
             if (now - this.lastHourlyStatsAt >= HOURLY_STATS_REFRESH_MS) {
                 this.lastHourlyStatsAt = now;

@@ -85,6 +85,8 @@ class ChatStats {
     this.userMentionStats = null;
     this.userDailyMessageStats = null;
     this.emoteExclusions = null;
+    this.streamSessions = null;
+    this.streamViewerSamples = null;
     this.wordBuffer = new Map();
     this.mentionBuffer = new Map();
     this.messageCountBuffer = new Map();
@@ -137,6 +139,11 @@ class ChatStats {
       // of un-tracked emotes get DELETED by pruneUntrackedEmoteStats(), so "ever tracked" can no
       // longer be derived from WordLifetimeStats alone - this collection is what survives.
       this.emoteExclusions = db.collection("EmoteExclusions");
+      // Stream-level viewer/category history, backing the web panel's per-stream stats chart.
+      // See ensureOpenSession/endStreamSession/recordStreamSample - piggybacked on
+      // ActivitiTracker's existing Get Streams poll, no new Helix calls or EventSub subscriptions.
+      this.streamSessions = db.collection("StreamSessions");
+      this.streamViewerSamples = db.collection("StreamViewerSamples");
 
       await this.commandStats.createIndex({ channel: 1 }, { unique: true });
       await this.modsUpTimeStats.createIndex({ channelId: 1, userId: 1, timestamp: 1 }, { unique: true });
@@ -189,6 +196,16 @@ class ChatStats {
       await this.userDailyMessageStats.createIndex({ channel: 1, userId: 1, date: 1 }, { unique: true });
       await this.userDailyMessageStats.createIndex({ channel: 1, date: 1, count: -1, userId: 1 });
       await this.emoteExclusions.createIndex({ channel: 1, word: 1 }, { unique: true });
+      // At most one OPEN session per channel - a defense-in-depth invariant, not just a query
+      // optimization: ensureOpenSession() below is careful to close a stale session before
+      // opening a new one, but this index makes "two open sessions for the same channel" a
+      // write-time impossibility rather than something only application logic prevents.
+      await this.streamSessions.createIndex(
+        { channelId: 1 },
+        { unique: true, partialFilterExpression: { endedAt: null } }
+      );
+      await this.streamSessions.createIndex({ channelId: 1, startedAt: -1 });
+      await this.streamViewerSamples.createIndex({ channelId: 1, timestamp: 1 }, { unique: true });
       const list = await this.whiteListCollection.find({}).toArray();
       this.whiteListCache = new Map();
       for (const item of list) {
@@ -269,6 +286,71 @@ class ChatStats {
       }
     } catch (err) {
       console.error('[DB] updatemoduptime Error:', err);
+    }
+  }
+
+  // Called on every live poll tick (not just the live-transition edge), same idempotent-piggyback
+  // pattern as recordDailyModeratorStats' hourly refresh - so a bot restart mid-stream just finds
+  // the still-open session and keeps appending to it instead of needing separate "just went live"
+  // vs "already live, bot restarted" handling.
+  //
+  // The one thing that pattern alone can't tell apart: a session left open because the bot was
+  // down (crashed/redeployed) through the real end of THAT stream, possibly through the start of
+  // a later one too. Blindly reusing "the channel's open session" in that case would silently glue
+  // two unrelated streams (and the dead gap between them) into one. staleAfterMs guards against
+  // that - if the open session hasn't seen a sample in longer than that, it's abandoned: close it
+  // at its own last-known-good timestamp (an honest estimate, not "now") and start a fresh one.
+  async ensureOpenSession(channelId, channelLogin, now, staleAfterMs) {
+    await this.ensureInitialized();
+    channelId = String(channelId);
+
+    const open = await this.streamSessions.findOne({ channelId, endedAt: null });
+    if (!open) {
+      await this.streamSessions.insertOne({ channelId, channelLogin, startedAt: now, endedAt: null });
+      return;
+    }
+
+    const lastSample = await this.streamViewerSamples.findOne(
+      { channelId },
+      { sort: { timestamp: -1 } }
+    );
+    const lastActivity = lastSample && lastSample.timestamp > open.startedAt
+      ? lastSample.timestamp
+      : open.startedAt;
+
+    if (now - lastActivity > staleAfterMs) {
+      await this.streamSessions.updateOne({ _id: open._id }, { $set: { endedAt: lastActivity } });
+      await this.streamSessions.insertOne({ channelId, channelLogin, startedAt: now, endedAt: null });
+    }
+    // else: still fresh - reuse the open session as-is, nothing to write.
+  }
+
+  // Closes every open session for the channel (there is at most one - see the partial unique
+  // index on StreamSessions). updateMany rather than updateOne purely for idempotence-under-retry;
+  // this only ever matches zero or one document in practice.
+  async endStreamSession(channelId, endedAt) {
+    await this.ensureInitialized();
+    await this.streamSessions.updateMany(
+      { channelId: String(channelId), endedAt: null },
+      { $set: { endedAt } }
+    );
+  }
+
+  // One row per live poll tick - deliberately NOT tagged with a sessionId (see ../../CLAUDE.md-
+  // style reasoning elsewhere in this file: session membership is derived by the reader via a
+  // [startedAt, endedAt) time-range scan, same convention as querying `messages` by channel+time
+  // range rather than a foreign key).
+  async recordStreamSample(channelId, timestamp, viewerCount, category) {
+    await this.ensureInitialized();
+    try {
+      await this.streamViewerSamples.insertOne({
+        channelId: String(channelId),
+        timestamp,
+        viewerCount,
+        category
+      });
+    } catch (err) {
+      console.error('[DB] recordStreamSample error:', err);
     }
   }
 
