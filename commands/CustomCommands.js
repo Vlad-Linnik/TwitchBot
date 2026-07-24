@@ -608,12 +608,16 @@ class CustomCommands {
           var broadcasterId = this.getBroadcasterId(channel);
           var sent = broadcasterId && await TwitchChatAPI.sendAnnouncement(broadcasterId, commandResult, cmdData.announceColor);
           if (!sent) await client.say(channel, commandResult);
-        } else {
+        } else if (cmdData.pin) {
           var messageId = await client.say(channel, commandResult);
-          if (cmdData.pin && isMod(userState) && messageId) {
+          if (isMod(userState) && messageId) {
             var broadcasterId = this.getBroadcasterId(channel);
             if (broadcasterId) TwitchChatAPI.pinMessage(broadcasterId, messageId);
           }
+        } else {
+          // Neither announce nor pin - reply directly to whoever triggered it instead of
+          // posting a bare line, so the response reads as addressed to them (Twitch reply threading).
+          await client.say(channel, commandResult, userState["id"]);
         }
         this.lastCustomCommand = new Date().getTime();
         // someone just said it in chat - push the next auto-send a full period out
