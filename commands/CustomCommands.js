@@ -371,23 +371,24 @@ class CustomCommands {
       var CommandResult = res[2];
       if (! await ChatStats.isCommandExist(channel, newCommand)){
         ChatStats.addNewCustomCommand(channel, newCommand, CommandResult);
-        this.CommandsDict[channel][newCommand] = {result: CommandResult, timer: null, pin: false, announce: false, announceColor: "primary", enabled: true, categoryTexts: []};
+        this.CommandsDict[channel][newCommand] = {result: CommandResult, timer: null, pin: false, announce: false, announceColor: "primary", enabled: true, categoryTexts: [], modOnly: false};
         this.CommandsKeysList[channel] = Object.keys(this.CommandsDict[channel]).sort((a,b) => b.length - a.length);
         client.say(channel, `Команда успешно добавлена ✅`, userState["id"]);
         return 1;
       }
       // изменить существующую команду (текст) — таймер, автозакрепление (!settimer/!setpin),
-      // объявление (!setannounce), состояние включена/выключена и текст по категориям стрима
-      // (настраивается только на сайте), если были настроены ранее, сохраняются, чтобы правка
-      // текста не сбрасывала их
+      // объявление (!setannounce), состояние включена/выключена, текст по категориям стрима и
+      // ограничение только для модераторов (настраиваются только на сайте), если были настроены
+      // ранее, сохраняются, чтобы правка текста не сбрасывала их
       var existingTimer = this.CommandsDict[channel][newCommand]?.timer ?? null;
       var existingPin = this.CommandsDict[channel][newCommand]?.pin ?? false;
       var existingAnnounce = this.CommandsDict[channel][newCommand]?.announce ?? false;
       var existingAnnounceColor = this.CommandsDict[channel][newCommand]?.announceColor ?? "primary";
       var existingEnabled = this.CommandsDict[channel][newCommand]?.enabled ?? true;
       var existingCategoryTexts = this.CommandsDict[channel][newCommand]?.categoryTexts ?? [];
-      ChatStats.editCustomCommand(channel, newCommand, CommandResult, existingTimer, existingPin, existingAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts);
-      this.CommandsDict[channel][newCommand] = {result: CommandResult, timer: existingTimer, pin: existingPin, announce: existingAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts};
+      var existingModOnly = this.CommandsDict[channel][newCommand]?.modOnly ?? false;
+      ChatStats.editCustomCommand(channel, newCommand, CommandResult, existingTimer, existingPin, existingAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts, existingModOnly);
+      this.CommandsDict[channel][newCommand] = {result: CommandResult, timer: existingTimer, pin: existingPin, announce: existingAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts, modOnly: existingModOnly};
       this.CommandsKeysList[channel] = Object.keys(this.CommandsDict[channel]).sort((a,b) => b.length - a.length);
       client.say(channel, `command updated ✅`, userState["id"]);
       return 1;
@@ -422,6 +423,7 @@ class CustomCommands {
       var existingAnnounceColor = this.CommandsDict[channel][cmdName]["announceColor"] ?? "primary";
       var existingEnabled = this.CommandsDict[channel][cmdName]["enabled"] ?? true;
       var existingCategoryTexts = this.CommandsDict[channel][cmdName]["categoryTexts"] ?? [];
+      var existingModOnly = this.CommandsDict[channel][cmdName]["modOnly"] ?? false;
       // timer + pin can't coexist - pin fires on every auto-post, and Twitch only
       // allows one active pinned message per channel at a time
       if (newTimerSeconds !== null && existingPin) {
@@ -430,8 +432,8 @@ class CustomCommands {
       }
       var newTimer = newTimerSeconds === null ? null : newTimerSeconds * 1000;
       var existingResult = this.CommandsDict[channel][cmdName]["result"];
-      ChatStats.editCustomCommand(channel, cmdName, existingResult, newTimer, existingPin, existingAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts);
-      this.CommandsDict[channel][cmdName] = {result: existingResult, timer: newTimer, pin: existingPin, announce: existingAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts};
+      ChatStats.editCustomCommand(channel, cmdName, existingResult, newTimer, existingPin, existingAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts, existingModOnly);
+      this.CommandsDict[channel][cmdName] = {result: existingResult, timer: newTimer, pin: existingPin, announce: existingAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts, modOnly: existingModOnly};
       // timer membership/period changed for this channel - recompute the stagger for the whole group
       this.scheduleChannelCommands(channel);
       client.say(channel, newTimer
@@ -465,6 +467,7 @@ class CustomCommands {
       var existingAnnounceColor = this.CommandsDict[channel][cmdName]["announceColor"] ?? "primary";
       var existingEnabled = this.CommandsDict[channel][cmdName]["enabled"] ?? true;
       var existingCategoryTexts = this.CommandsDict[channel][cmdName]["categoryTexts"] ?? [];
+      var existingModOnly = this.CommandsDict[channel][cmdName]["modOnly"] ?? false;
       // timer + pin can't coexist - see setCommandTimer
       if (newPin && existingTimer) {
         client.say(channel, `Нельзя включить автозакрепление для !${cmdName}, пока включен таймер (${settings.commands.settimer.signature} !${cmdName} off) 😱`, userState["id"]);
@@ -476,10 +479,10 @@ class CustomCommands {
         client.say(channel, `Нельзя включить автозакрепление для !${cmdName}, пока включено объявление (${settings.commands.setannounce.signature} !${cmdName} off) 😱`, userState["id"]);
         return 1;
       }
-      ChatStats.editCustomCommand(channel, cmdName, existingResult, existingTimer, newPin, existingAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts);
-      this.CommandsDict[channel][cmdName] = {result: existingResult, timer: existingTimer, pin: newPin, announce: existingAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts};
+      ChatStats.editCustomCommand(channel, cmdName, existingResult, existingTimer, newPin, existingAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts, existingModOnly);
+      this.CommandsDict[channel][cmdName] = {result: existingResult, timer: existingTimer, pin: newPin, announce: existingAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts, modOnly: existingModOnly};
       client.say(channel, newPin
-        ? `Команда !${cmdName} теперь автоматически закрепляется в чате (только для модераторов) ✅`
+        ? `Команда !${cmdName} теперь автоматически закрепляется в чате (закрепление сработает, только если её вызвал модератор) ✅`
         : `Автозакрепление для !${cmdName} отключено ✅`, userState["id"]);
       return 1;
     }
@@ -509,13 +512,14 @@ class CustomCommands {
       var existingAnnounceColor = this.CommandsDict[channel][cmdName]["announceColor"] ?? "primary";
       var existingEnabled = this.CommandsDict[channel][cmdName]["enabled"] ?? true;
       var existingCategoryTexts = this.CommandsDict[channel][cmdName]["categoryTexts"] ?? [];
+      var existingModOnly = this.CommandsDict[channel][cmdName]["modOnly"] ?? false;
       // announce + pin can't coexist - see setCommandPin
       if (newAnnounce && existingPin) {
         client.say(channel, `Нельзя включить объявление для !${cmdName}, пока включено автозакрепление (${settings.commands.setpin.signature} !${cmdName} off) 😱`, userState["id"]);
         return 1;
       }
-      ChatStats.editCustomCommand(channel, cmdName, existingResult, existingTimer, existingPin, newAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts);
-      this.CommandsDict[channel][cmdName] = {result: existingResult, timer: existingTimer, pin: existingPin, announce: newAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts};
+      ChatStats.editCustomCommand(channel, cmdName, existingResult, existingTimer, existingPin, newAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts, existingModOnly);
+      this.CommandsDict[channel][cmdName] = {result: existingResult, timer: existingTimer, pin: existingPin, announce: newAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts, modOnly: existingModOnly};
       client.say(channel, newAnnounce
         ? `Команда !${cmdName} теперь отправляется как объявление в чате (цвет настраивается на сайте) ✅`
         : `Объявление для !${cmdName} отключено ✅`, userState["id"]);
@@ -565,10 +569,18 @@ class CustomCommands {
   // category (case-insensitive - mods type it freely on the web panel), or the command's plain
   // `result` for every other category (including offline/unknown, where streamStatus.getCategory
   // returns null). Web-panel-only feature - see lib/commandValidation.js on the TwitchBot-Web side.
-  resolveCommandText = (channel, cmdData) =>
+  // Only commands that actually have categoryTexts pay for a live Helix check (streamStatus's
+  // cache is otherwise up to ActivitiTracker's 5-minute poll interval stale) - a mod switching
+  // category mid-stream and immediately triggering the command used to get the old category's
+  // text back. Every other command keeps reading the cheap cached value.
+  resolveCommandText = async (channel, cmdData) =>
   {
-    const category = streamStatus.getCategory(this.getBroadcasterId(channel));
-    if (category && cmdData.categoryTexts && cmdData.categoryTexts.length) {
+    const broadcasterId = this.getBroadcasterId(channel);
+    const hasCategoryTexts = cmdData.categoryTexts && cmdData.categoryTexts.length;
+    const category = hasCategoryTexts
+      ? await streamStatus.refreshCategory(broadcasterId)
+      : streamStatus.getCategory(broadcasterId);
+    if (category && hasCategoryTexts) {
       const override = cmdData.categoryTexts.find((ct) => ct.category.toLowerCase() === category.toLowerCase());
       if (override) return override.result;
     }
@@ -583,20 +595,22 @@ class CustomCommands {
         // Disabled on the web panel - treat it as if the command didn't match at all, so a
         // shorter command name sharing a prefix still gets a chance to match.
         if (cmdData.enabled === false) continue;
-        // Pin-on-send and announce-on-send are both moderation-flavored actions (pinning
-        // replaces the channel's single active pin; an announcement is a highlighted, colored
-        // system-style message) - only mods, who could do either manually anyway, may trigger
-        // a command with either flag on.
-        if ((cmdData.pin || cmdData.announce) && !isMod(userState)) return 1;
+        // `modOnly` gates whether the command can be triggered at all - a mod opts a command
+        // into that explicitly (web-panel-only, like categoryTexts). Pin no longer gates
+        // triggering by itself: a non-mod's `!name` on a pin-enabled command still sends the
+        // text, it just doesn't pin it below - only the pin action itself stays mod-gated
+        // (it replaces the channel's single active pin, so a non-mod repeatedly triggering it
+        // must not be able to keep changing what's pinned).
+        if (cmdData.modOnly && !isMod(userState)) return 1;
         if (!isTimerReady(this.lastCustomCommand, this.customCommandsTimer)) return 1;
-        var commandResult = this.substituteCounters(channel, this.resolveCommandText(channel, cmdData));
+        var commandResult = this.substituteCounters(channel, await this.resolveCommandText(channel, cmdData));
         if (cmdData.announce) {
           var broadcasterId = this.getBroadcasterId(channel);
           var sent = broadcasterId && await TwitchChatAPI.sendAnnouncement(broadcasterId, commandResult, cmdData.announceColor);
           if (!sent) await client.say(channel, commandResult);
         } else {
           var messageId = await client.say(channel, commandResult);
-          if (cmdData.pin && messageId) {
+          if (cmdData.pin && isMod(userState) && messageId) {
             var broadcasterId = this.getBroadcasterId(channel);
             if (broadcasterId) TwitchChatAPI.pinMessage(broadcasterId, messageId);
           }
@@ -669,7 +683,7 @@ class CustomCommands {
         this.scheduleCommand(channel, cmdName, this.autoSendRetryMs);
         return;
       }
-      const commandResult = this.substituteCounters(channel, this.resolveCommandText(channel, cmd));
+      const commandResult = this.substituteCounters(channel, await this.resolveCommandText(channel, cmd));
       if (cmd.announce) {
         const broadcasterId = this.getBroadcasterId(channel);
         const sent = broadcasterId && await TwitchChatAPI.sendAnnouncement(broadcasterId, commandResult, cmd.announceColor);
