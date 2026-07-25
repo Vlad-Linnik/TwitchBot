@@ -48,6 +48,13 @@ const DEFAULT_CHANNEL_SETTINGS = {
 // login -> { settings, expiresAt }
 const settingsCache = new Map();
 const bannedWordsRegexCache = new Map();
+// login -> Map<cacheKey, RegExp>, compiled by getCommandSignatureRegex/getCommandSignatureArgRegex.
+// Every built-in command handler calls one of those on every chat message it looks at (see
+// commands/msgHandle.js's execCommands), and until this cache existed each call did a fresh
+// `new RegExp(...)` from the signature string - wasted work, since a channel's signatures only
+// change when its settings are edited (rare), same cache-per-login-until-refresh lifetime as
+// bannedWordsRegexCache right above.
+const signatureRegexCache = new Map();
 const refreshing = new Map(); // login -> in-flight refresh promise (dedupes concurrent refreshFromMongo calls)
 let channelConfigCollection;
 
@@ -79,6 +86,7 @@ async function ensureCollection() {
 function setCache(login, settings, ttlMs = CACHE_TTL_MS) {
   settingsCache.set(login, { settings, expiresAt: Date.now() + ttlMs });
   bannedWordsRegexCache.delete(login);
+  signatureRegexCache.delete(login);
 }
 
 // Fire-and-forget: refreshes the cache for `login` from the ChannelConfig collection
@@ -139,23 +147,57 @@ function getBannedWordsRegex(channel) {
   return regex;
 }
 
+// Shared cache lookup for the two functions below: `build` only runs on a miss, and the result is
+// kept until setCache() (a settings write or a periodic refresh) invalidates the whole per-login
+// entry - the same lifetime bannedWordsRegexCache already uses.
+function getCachedSignatureRegex(login, cacheKey, build) {
+  let channelCache = signatureRegexCache.get(login);
+  if (!channelCache) {
+    channelCache = new Map();
+    signatureRegexCache.set(login, channelCache);
+  }
+  let regex = channelCache.get(cacheKey);
+  if (!regex) {
+    regex = build();
+    channelCache.set(cacheKey, regex);
+  }
+  return regex;
+}
+
 // Builds a regex from a channel-configured command signature (e.g. commands.topchatters.signature)
 // instead of a hardcoded trigger word, so channels can rename/alias built-in commands.
+//
+// The trailing `(?:\s|$)` requires a word boundary right after the signature - without it,
+// "!topchattersfoo" matched "!topchatters" too (a plain string-prefix test with no end marker),
+// so a mistyped or unrelated longer word could spuriously fire a command. getCommandSignatureArgRegex
+// below doesn't need this itself - the literal space it already requires before argPattern serves
+// the same purpose.
 function getCommandSignatureRegex(channel, commandName, field = 'signature', { anchored = true } = {}) {
+  const login = normalizeChannel(channel);
   const signature = getSettings(channel).commands[commandName][field];
-  return new RegExp((anchored ? '^' : '') + escapeRegExp(signature.toLowerCase()));
+  const cacheKey = `${commandName}|${field}|${anchored ? 1 : 0}`;
+  return getCachedSignatureRegex(login, cacheKey, () =>
+    new RegExp((anchored ? '^' : '') + escapeRegExp(signature.toLowerCase()) + '(?:\\s|$)')
+  );
 }
 
 // Same as getCommandSignatureRegex but with a trailing arg-capture pattern appended
-// (e.g. "!topchatters (\w+)" built from the configured signature).
+// (e.g. "!topchatters (\w+)" built from the configured signature). argPattern is always one of a
+// handful of literals hardcoded at each call site (never user input), so it's safe to fold into
+// the cache key as-is.
 function getCommandSignatureArgRegex(channel, commandName, argPattern, field = 'signature') {
+  const login = normalizeChannel(channel);
   const signature = getSettings(channel).commands[commandName][field];
-  return new RegExp('^' + escapeRegExp(signature.toLowerCase()) + ' ' + argPattern);
+  const cacheKey = `${commandName}|${field}|arg:${argPattern}`;
+  return getCachedSignatureRegex(login, cacheKey, () =>
+    new RegExp('^' + escapeRegExp(signature.toLowerCase()) + ' ' + argPattern)
+  );
 }
 
 function reload() {
   settingsCache.clear();
   bannedWordsRegexCache.clear();
+  signatureRegexCache.clear();
 }
 
 module.exports = {

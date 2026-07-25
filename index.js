@@ -160,35 +160,48 @@ async function bootstrap() {
     if (userState["user-id"] == botInitInfo.settings["bot_id"]) return;
     if (userState["username"].toLocaleLowerCase() == 'moobot') return;
 
-    // log msg
-    if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase())) {
-      ChatStats.addMessage(userState["user-id"], userState["username"], message, channel)
-        .catch(err => console.error('[ChatStats] addMessage error:', err));
-      // counts toward the "standard messages between automated commands" gate
-      customCommands.recordChatMessage(channel);
-    }
+    // Everything below touches Mongo/regex/external state per message across every channel this
+    // bot serves - a single wrapping try/catch keeps a transient failure (e.g. a Mongo hiccup
+    // inside one channel's !topchatters query) from becoming an unhandled rejection that takes
+    // the whole process down for every channel. Node's default (unhandled-rejections=throw)
+    // crashes the process on an uncaught rejection, and that failure wouldn't even reach
+    // BotHeartbeat's error ring buffer (shared/errorRingBuffer.js only wraps console.error).
+    try {
+      // log msg
+      if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase())) {
+        ChatStats.addMessage(userState["user-id"], userState["username"], message, channel)
+          .catch(err => console.error('[ChatStats] addMessage error:', err));
+        // counts toward the "standard messages between automated commands" gate
+        customCommands.recordChatMessage(channel);
+      }
 
-    // spam protection
-    if (await msgHandle.spam_protection(client, channel, userState, message)) {
-      return;
-    }
-
-    // ! commands
-    if (message.match(/^!|^#/)) {
-      if (msgHandle.execCommands(client, channel, userState, message)) {
+      // spam protection
+      if (await msgHandle.spam_protection(client, channel, userState, message)) {
         return;
       }
-    }
-    
-    // direct msg to this bot
-    if (message.toLowerCase().includes(botInitInfo.settings["username"].toLowerCase())) {
-      if (msgHandle.directMsgCheck(client, channel, userState, message)) {
-        return;
-      }
-    }
 
-    //radom things
-    msgHandle.randomEventsAndThings(client, channel, userState, message);
+      // ! commands
+      if (message.match(/^!|^#/)) {
+        // execCommands is async - must be awaited. An unawaited call here used to make this `if`
+        // always truthy (a Promise is always truthy), so it "worked" by accident: every !/#
+        // message returned early regardless of whether any handler actually matched.
+        if (await msgHandle.execCommands(client, channel, userState, message)) {
+          return;
+        }
+      }
+
+      // direct msg to this bot
+      if (message.toLowerCase().includes(botInitInfo.settings["username"].toLowerCase())) {
+        if (msgHandle.directMsgCheck(client, channel, userState, message)) {
+          return;
+        }
+      }
+
+      //radom things
+      msgHandle.randomEventsAndThings(client, channel, userState, message);
+    } catch (err) {
+      console.error(`[chat] handler error in ${channel}:`, describeError(err));
+    }
   });
 
   // startup

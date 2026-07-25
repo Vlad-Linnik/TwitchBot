@@ -663,12 +663,13 @@ class ChatStats {
           pin: command["pin"] || false,
           announce: command["announce"] || false,
           announceColor: command["announceColor"] || "primary",
-          // enabled/categoryTexts/modOnly are web-panel-only (TwitchBot-Web's /<channel>/commands) -
-          // chat has no command that sets any of them, so a doc predating this feature just gets
-          // the defaults.
+          // enabled/categoryTexts/modOnly/aliases are web-panel-only (TwitchBot-Web's
+          // /<channel>/commands) - chat has no command that sets any of them, so a doc predating
+          // one of these features just gets the defaults.
           enabled: command["enabled"] !== false,
           categoryTexts: command["categoryTexts"] || [],
           modOnly: command["modOnly"] === true,
+          aliases: Array.isArray(command["aliases"]) ? command["aliases"] : [],
         };
     }
     return CommandsDict;
@@ -676,7 +677,7 @@ class ChatStats {
 
   async addNewCustomCommand(channel, command, result, timer = null, pin = false, announce = false, announceColor = "primary") {
     await this.ensureInitialized();
-    this.customCommandsCollection.insertOne({channel, command, result, timer, pin, announce, announceColor, enabled: true, categoryTexts: [], modOnly: false})
+    this.customCommandsCollection.insertOne({channel, command, result, timer, pin, announce, announceColor, enabled: true, categoryTexts: [], modOnly: false, aliases: []})
       .catch(err => console.error('[DB] addNewCustomCommand error:', err));
   }
 
@@ -688,7 +689,7 @@ class ChatStats {
       .catch(err => console.error('[DB] deleteCustomCommand error:', err));
   }
 
-  async editCustomCommand(channel, command, new_result, new_timer = null, new_pin = false, new_announce = false, new_announceColor = "primary", new_enabled = true, new_categoryTexts = [], new_modOnly = false) {
+  async editCustomCommand(channel, command, new_result, new_timer = null, new_pin = false, new_announce = false, new_announceColor = "primary", new_enabled = true, new_categoryTexts = [], new_modOnly = false, new_aliases = []) {
     await this.ensureInitialized();
     this.customCommandsCollection.updateOne({channel:channel, command:command},
     {
@@ -701,7 +702,8 @@ class ChatStats {
         announceColor: new_announceColor,
         enabled: new_enabled,
         categoryTexts: new_categoryTexts,
-        modOnly: new_modOnly
+        modOnly: new_modOnly,
+        aliases: new_aliases
       }
     }).catch(err => console.error('[DB] editCustomCommand error:', err));
   }
