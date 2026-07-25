@@ -274,11 +274,11 @@ async function weather(client, channel, userState, message) {
   } else { return 1; }
 
   const res = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'weather', '(.+)'));
-  if (!res) {
+  const city = res ? res[1].trim() : (settings.commands.weather.defaultCity || '').trim();
+  if (!city) {
     client.say(channel, `Ожидалось: ${settings.commands.weather.signature} Город VoHiYo `, userState["id"]);
     return 1;
   }
-  const city = res[1].trim();
 
   try {
     const result = await Weather.getWeather(city);
@@ -286,7 +286,8 @@ async function weather(client, channel, userState, message) {
       client.say(channel, `город "${city}" не найден VoHiYo `, userState["id"]);
       return 1;
     }
-    client.say(channel, `Сейчас погода в ${city}: ${result.description}, ${result.tempC}°C ${result.emoji}`, userState["id"]);
+    const emojiPart = result.isMoonEmoji ? `фаза луны: ${result.emoji}` : result.emoji;
+    client.say(channel, `Сейчас погода в ${city}: ${result.description}, ${result.tempC}°C, ${emojiPart}`, userState["id"]);
   } catch (err) {
     console.error('[Weather] Failed to fetch weather:', err.message);
     client.say(channel, `ошибка получения погоды VoHiYo `, userState["id"]);

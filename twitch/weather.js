@@ -17,7 +17,30 @@ const WEATHER_CODE_EMOJI = [
   },
 ];
 
-function emojiForCode(code) {
+// worldweatheronline uses the same numeric code for a condition at any hour - "clear" is 113
+// whether it's noon or midnight - so day/night only shows up in the icon filename
+// (e.g. "..._night.png"). Only the two sky-only codes actually look wrong without that: a
+// literal sun at 3am - swapped for the real moon phase (from the same response's astronomy
+// block) rather than a single fixed 🌙, since "clear at night" already tells you which phase.
+const NIGHT_OVERRIDE_CODES = ['113', '116'];
+
+const MOON_PHASE_EMOJI = {
+  'new moon': '🌑',
+  'waxing crescent': '🌒',
+  'first quarter': '🌓',
+  'waxing gibbous': '🌔',
+  'full moon': '🌕',
+  'waning gibbous': '🌖',
+  'last quarter': '🌗',
+  'waning crescent': '🌘',
+};
+
+function moonPhaseEmoji(phase) {
+  return MOON_PHASE_EMOJI[(phase || '').toLowerCase()] || '🌙';
+}
+
+function emojiForCode(code, isNight, moonPhase) {
+  if (isNight && NIGHT_OVERRIDE_CODES.includes(code)) return moonPhaseEmoji(moonPhase);
   const match = WEATHER_CODE_EMOJI.find((entry) => entry.codes.includes(code));
   return match ? match.emoji : '🌡️';
 }
@@ -44,7 +67,16 @@ async function getWeather(city) {
   const tempC = current.temp_C;
   if (!description || tempC === undefined) return null;
 
-  return { description, tempC, emoji: emojiForCode(current.weatherCode) };
+  const isNight = /night/i.test(current.weatherIconUrl?.[0]?.value || '');
+  const moonPhase = data.weather?.[0]?.astronomy?.[0]?.moon_phase;
+  const isMoonEmoji = isNight && NIGHT_OVERRIDE_CODES.includes(current.weatherCode);
+
+  return {
+    description,
+    tempC,
+    emoji: emojiForCode(current.weatherCode, isNight, moonPhase),
+    isMoonEmoji,
+  };
 }
 
 module.exports = { getWeather };
