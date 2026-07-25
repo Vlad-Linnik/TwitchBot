@@ -30,6 +30,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
     exception: { enabled: true, signature: "!addexception", remSignature: "!remexception" },
     update7tv: { enabled: true, cooldownMs: 30000, signature: "!update7tv" },
     randomclip: { enabled: true, cooldownMs: 30000, signature: "!randomclip" },
+    weather: { enabled: true, cooldownMs: 15000, signature: "!weather" },
     muteduel: { enabled: true, cooldownMs: 50000, signature: "!muteduel", acceptSignature: "!muteaccept" },
     question: { enabled: true, cooldownMs: 30000 },
     directmsg: { enabled: true, cooldownMs: 15000 },

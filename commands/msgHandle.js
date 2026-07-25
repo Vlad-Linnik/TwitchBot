@@ -21,6 +21,7 @@ const Normalization = require("../shared/Normalization.js");
 const channelSettings = require("../config/channelSettings.js");
 const { syncChannelEmoteSet } = require("../sevenTv/SevenTvEmotes.js");
 const Clips = require("../twitch/clips.js");
+const Weather = require("../twitch/weather.js");
 
 // timers - per-channel maps so a cooldown in one channel doesn't block another;
 // cooldown durations themselves come from that channel's settings.
@@ -32,6 +33,7 @@ var lastcountUnique = new Map();
 var lastDirectMSG = new Map();
 var lastUpdateSevenTv = new Map();
 var lastRandomClip = new Map();
+var lastWeather = new Map();
 
 // utilities
 var possible_periods = ["day", "week", "month", "all"];
@@ -263,6 +265,35 @@ async function randomClip(client, channel, userState, message) {
   return 1;
 }
 
+async function weather(client, channel, userState, message) {
+  const settings = channelSettings.getSettings(channel);
+  if (!settings.commands.weather.enabled) return 0;
+  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'weather'))) return 0;
+  if (isTimerReady(lastWeather.get(channel) || 0, settings.commands.weather.cooldownMs)) {
+    lastWeather.set(channel, Date.now());
+  } else { return 1; }
+
+  const res = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'weather', '(.+)'));
+  if (!res) {
+    client.say(channel, `Ожидалось: ${settings.commands.weather.signature} Город VoHiYo `, userState["id"]);
+    return 1;
+  }
+  const city = res[1].trim();
+
+  try {
+    const result = await Weather.getWeather(city);
+    if (!result) {
+      client.say(channel, `город "${city}" не найден VoHiYo `, userState["id"]);
+      return 1;
+    }
+    client.say(channel, `Сейчас погода в ${city}: ${result.description}, ${result.tempC}°C ${result.emoji}`, userState["id"]);
+  } catch (err) {
+    console.error('[Weather] Failed to fetch weather:', err.message);
+    client.say(channel, `ошибка получения погоды VoHiYo `, userState["id"]);
+  }
+  return 1;
+}
+
 async function execCommands(client, channel, userState, message) {
   const commandCheck = [
     muteDuel,
@@ -271,7 +302,7 @@ async function execCommands(client, channel, userState, message) {
   ];
   const asyncCommandsCheck = [
     customCommands.getAllCustomCommands,
-    get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,randomClip,
+    get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,randomClip,weather,
     customCommands.addCommand,
     customCommands.deleteCustomCommand,
     customCommands.setCommandTimer,
