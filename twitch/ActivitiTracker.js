@@ -11,6 +11,14 @@ const emoteSyncScheduler = require('./emoteSyncScheduler.js');
 // is safe: it's an idempotent upsert of the day's totals-so-far, not a running counter.
 const HOURLY_STATS_REFRESH_MS = 60 * 60 * 1000;
 
+// ensureOpenSession's staleAfterMs: below this gap since the last recorded viewer sample, a bot
+// restart (crash/redeploy) mid-stream resumes the same StreamSessions row instead of splitting
+// the web panel's "Статистика стрима" chart into a new stream date. Above it, the session is
+// presumed abandoned (the real stream likely ended, possibly a new one started) and gets closed
+// at its own last-known-good timestamp instead. A fixed 1 hour rather than a multiple of the poll
+// interval, since the thing being bounded is bot downtime, not poll cadence.
+const SESSION_RESTART_GRACE_MS = 60 * 60 * 1000;
+
 class ModActivityTracker {
     constructor(broadcasterId, channelLogin, checkIntervalMs = 300000) {
         this.broadcasterId = broadcasterId;
@@ -133,10 +141,8 @@ class ModActivityTracker {
             this.isLive = true;
 
             // Piggyback the viewer/category history collector on this same poll - see
-            // ChatStats.ensureOpenSession/recordStreamSample. staleAfterMs = 3x the poll interval:
-            // long enough that one missed/slow tick never falsely orphans a genuinely-live
-            // session, short enough to catch a real bot-down gap well before the next stream.
-            ChatStats.ensureOpenSession(this.broadcasterId, this.channelLogin, new Date(now), this.intervalMs * 3)
+            // ChatStats.ensureOpenSession/recordStreamSample and SESSION_RESTART_GRACE_MS above.
+            ChatStats.ensureOpenSession(this.broadcasterId, this.channelLogin, new Date(now), SESSION_RESTART_GRACE_MS)
                 .catch(err => console.error('[ModTracker] ensureOpenSession error:', err));
             ChatStats.recordStreamSample(this.broadcasterId, new Date(now), streamInfo.viewer_count, streamInfo.game_name || null)
                 .catch(err => console.error('[ModTracker] recordStreamSample error:', err));
