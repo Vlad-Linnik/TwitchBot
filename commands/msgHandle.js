@@ -301,7 +301,8 @@ async function weather(client, channel, userState, message) {
     const emojiPart = result.isMoonEmoji ? `фаза луны: ${result.emoji}` : result.emoji;
     const humidityPart = result.humidity !== undefined ? `, влажность ${result.humidity}%` : '';
     const advicePart = result.advice?.length ? ` — ${result.advice.join(' ')}` : '';
-    sayMaybeMention(client, channel, mentionTarget, userState["id"], `Сейчас погода в ${city}: ${result.description} ${emojiPart}, ${result.tempC}°C${humidityPart}${advicePart}`);
+    const locationLabel = result.resolvedLocation || city;
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `Сейчас погода в ${locationLabel}: ${result.description} ${emojiPart}, ${result.tempC}°C${humidityPart}${advicePart}`);
   } catch (err) {
     console.error('[Weather] Failed to fetch weather:', err.message);
     sayMaybeMention(client, channel, mentionTarget, userState["id"], `ошибка получения погоды VoHiYo `);
