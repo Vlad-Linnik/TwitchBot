@@ -22,6 +22,7 @@ const channelSettings = require("../config/channelSettings.js");
 const { syncChannelEmoteSet } = require("../sevenTv/SevenTvEmotes.js");
 const Clips = require("../twitch/clips.js");
 const Weather = require("../twitch/weather.js");
+const { parseMentionRedirect, sayMaybeMention } = require("../shared/mentionRedirect.js");
 
 // timers - per-channel maps so a cooldown in one channel doesn't block another;
 // cooldown durations themselves come from that channel's settings.
@@ -106,11 +107,12 @@ function directMsgCheck(client, channel, userState, message) {
 async function get_bot_info (client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.botinfo.enabled) return 0;
+  const { mentionTarget, rest } = parseMentionRedirect(message);
   const regex = channelSettings.getCommandSignatureRegex(channel, 'botinfo', 'signature', { anchored: false });
-  if (isMod(userState) && message.toLocaleLowerCase().match(regex)){
+  if (isMod(userState) && rest.toLocaleLowerCase().match(regex)){
     var timeD = new Date() - botInitInfo.settings["startTime"];
     var info = `works: ${timeChanger(timeD/1000)}`;
-    client.say(channel, info, userState["id"]);
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], info);
     return 1;
   }
   return 0;
@@ -119,31 +121,33 @@ async function get_bot_info (client, channel, userState, message) {
 async function count_unique(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.countunique.enabled) return 0;
-  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'countunique'))) {return 0;}
+  const { mentionTarget, rest } = parseMentionRedirect(message);
+  if (!rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'countunique'))) {return 0;}
   if (isTimerReady(lastcountUnique.get(channel) || 0, settings.commands.countunique.cooldownMs)){
     lastcountUnique.set(channel, Date.now());
   }else{return 1;}
-  var args = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'countunique', '(\\w+)'));
+  var args = rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'countunique', '(\\w+)'));
   var period = check_2args_command(args);
   var res =  await ChatStats.getUniqueUsersCount(channel, period);
-  client.say(channel, `уникальных пользователей: ${res} за ${period_text_list[period]}`, userState["id"]);
+  sayMaybeMention(client, channel, mentionTarget, null, `уникальных пользователей: ${res} за ${period_text_list[period]}`);
 }
 
 async function topChatters(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.topchatters.enabled) return 0;
-  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'topchatters'))) return 0;
+  const { mentionTarget, rest } = parseMentionRedirect(message);
+  if (!rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'topchatters'))) return 0;
   if (isTimerReady(lastTopUsers.get(channel) || 0, settings.commands.topchatters.cooldownMs)){
     lastTopUsers.set(channel, Date.now());
   }else{return 1;}
   let topSize = 7;
   let showTop =  5;
-  let args = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'topchatters', '(\\w+)'));
+  let args = rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'topchatters', '(\\w+)'));
   let period = check_2args_command(args);
   let TopUsers = await ChatStats.getTopUsers(topSize, channel, period);
   let top_smiles = ["👑","🥈","🥉","🍬","🍬"];
   let answer=`🏆 Топ чаттерсов за ${period_text_list[period]}`;
-  TopUsers = TopUsers.filter(item => 
+  TopUsers = TopUsers.filter(item =>
     item.userName !== 'moobot' && item.userName !== 'mistercopus_bot'
 );
   while (TopUsers.length > showTop) {
@@ -152,7 +156,7 @@ async function topChatters(client, channel, userState, message) {
   for (let row = 0; row < TopUsers.length; row++) {
     answer += top_smiles[row] + " " + TopUsers[row]["userName"] + " (" + TopUsers[row]["count"] + ") |";
   }
-  client.say(channel, answer);
+  sayMaybeMention(client, channel, mentionTarget, null, answer);
   return 1;
 }
 
@@ -160,11 +164,12 @@ async function topChatters(client, channel, userState, message) {
 async function topSmiles(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.topsmiles.enabled) return 0;
-  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'topsmiles'))) return  0;
+  const { mentionTarget, rest } = parseMentionRedirect(message);
+  if (!rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'topsmiles'))) return  0;
   if (isTimerReady(lasttopSmiles.get(channel) || 0, settings.commands.topsmiles.cooldownMs)){
     lasttopSmiles.set(channel, Date.now());
   }else{return 1;}
-  let args = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'topsmiles', '(\\w+)'));
+  let args = rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'topsmiles', '(\\w+)'));
   let topSize = 5;
   let period = check_2args_command(args);
   var answer = `🏆 Топ смайлов за ${period_text_list[period]}: `;
@@ -172,29 +177,34 @@ async function topSmiles(client, channel, userState, message) {
   for (let index = 0; index < TopSmilesList.length; index++) {
     answer += TopSmilesList[index]["word"] + " - (" + TopSmilesList[index]["count"] + ") | ";
   }
-  client.say(channel, answer);
+  sayMaybeMention(client, channel, mentionTarget, null, answer);
   return 1;
 }
 
 async function countWord(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.countword.enabled) return 0;
-  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'countword'))) return 0;
+  const { mentionTarget, rest } = parseMentionRedirect(message);
+  if (!rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'countword'))) return 0;
   if (isTimerReady(lastCountWord.get(channel) || 0, settings.commands.countword.cooldownMs)) {
     lastCountWord.set(channel, Date.now());
   }else{return 1;}
 
-  var res = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'countword', '(\\S+)'));
+  var res = rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'countword', '(\\S+)'));
   if (!res) {
-    client.say(channel, `Ожидалось: ${settings.commands.countword.signature} СловоДляПоиска  VoHiYo `, userState["id"]);
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `Ожидалось: ${settings.commands.countword.signature} СловоДляПоиска  VoHiYo `);
     return 1;
   }
   var keyWord = res[1];
   var wordInfo = await ChatStats.countWordOccurrences(keyWord, channel, "day");
-  client.say(channel, `Найдено упоминаний: ${wordInfo} за ${period_text_list["day"]}`, userState["id"]);
+  sayMaybeMention(client, channel, mentionTarget, userState["id"], `Найдено упоминаний: ${wordInfo} за ${period_text_list["day"]}`);
   return 1;
 }
 
+// Not wired up to parseMentionRedirect/sayMaybeMention on purpose, unlike its siblings below:
+// this reply is inherently first-person ("У вас N сообщений" = YOUR count, i.e. whoever typed
+// the message) - redirecting it to a mentioned user would misleadingly show them the caller's
+// own stats as if they were the target's.
 async function countUserMsg(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.countmsg.enabled) return 0;
@@ -243,7 +253,8 @@ async function updateSevenTvEmotes(client, channel, userState, message) {
 async function randomClip(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.randomclip.enabled) return 0;
-  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'randomclip'))) return 0;
+  const { mentionTarget, rest } = parseMentionRedirect(message);
+  if (!rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'randomclip'))) return 0;
   if (isTimerReady(lastRandomClip.get(channel) || 0, settings.commands.randomclip.cooldownMs)) {
     lastRandomClip.set(channel, Date.now());
   } else { return 1; }
@@ -254,13 +265,13 @@ async function randomClip(client, channel, userState, message) {
   try {
     const clip = await Clips.getRandomClip(broadcasterId);
     if (!clip) {
-      client.say(channel, `клипов не найдено VoHiYo `, userState["id"]);
+      sayMaybeMention(client, channel, mentionTarget, userState["id"], `клипов не найдено VoHiYo `);
       return 1;
     }
-    client.say(channel, `🎬 ${clip.title} — ${clip.url}`, userState["id"]);
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `🎬 ${clip.title} — ${clip.url}`);
   } catch (err) {
     console.error('[Clips] Failed to fetch random clip:', err.message);
-    client.say(channel, `ошибка получения клипа VoHiYo `, userState["id"]);
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `ошибка получения клипа VoHiYo `);
   }
   return 1;
 }
@@ -268,29 +279,32 @@ async function randomClip(client, channel, userState, message) {
 async function weather(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.commands.weather.enabled) return 0;
-  if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'weather'))) return 0;
+  const { mentionTarget, rest } = parseMentionRedirect(message);
+  if (!rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'weather'))) return 0;
   if (isTimerReady(lastWeather.get(channel) || 0, settings.commands.weather.cooldownMs)) {
     lastWeather.set(channel, Date.now());
   } else { return 1; }
 
-  const res = message.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'weather', '(.+)'));
+  const res = rest.toLocaleLowerCase().match(channelSettings.getCommandSignatureArgRegex(channel, 'weather', '(.+)'));
   const city = res ? res[1].trim() : (settings.commands.weather.defaultCity || '').trim();
   if (!city) {
-    client.say(channel, `Ожидалось: ${settings.commands.weather.signature} Город VoHiYo `, userState["id"]);
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `Ожидалось: ${settings.commands.weather.signature} Город VoHiYo `);
     return 1;
   }
 
   try {
     const result = await Weather.getWeather(city);
     if (!result) {
-      client.say(channel, `город "${city}" не найден VoHiYo `, userState["id"]);
+      sayMaybeMention(client, channel, mentionTarget, userState["id"], `город "${city}" не найден VoHiYo `);
       return 1;
     }
     const emojiPart = result.isMoonEmoji ? `фаза луны: ${result.emoji}` : result.emoji;
-    client.say(channel, `Сейчас погода в ${city}: ${result.description}, ${result.tempC}°C, ${emojiPart}`, userState["id"]);
+    const humidityPart = result.humidity !== undefined ? `, влажность ${result.humidity}%` : '';
+    const advicePart = result.advice?.length ? ` — ${result.advice.join(' ')}` : '';
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `Сейчас погода в ${city}: ${result.description}, ${result.tempC}°C${humidityPart}, ${emojiPart}${advicePart}`);
   } catch (err) {
     console.error('[Weather] Failed to fetch weather:', err.message);
-    client.say(channel, `ошибка получения погоды VoHiYo `, userState["id"]);
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `ошибка получения погоды VoHiYo `);
   }
   return 1;
 }

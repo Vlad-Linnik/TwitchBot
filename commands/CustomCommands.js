@@ -5,6 +5,7 @@ const botInitInfo = require("../botInitInfo.js");
 const channelSettings = require("../config/channelSettings.js");
 const streamStatus = require("../twitch/streamStatus.js");
 const TwitchChatAPI = require("../twitch/TwitchChatAPI.js");
+const { parseMentionRedirect, sayMaybeMention } = require("../shared/mentionRedirect.js");
 
 class Counter {
   constructor()
@@ -624,14 +625,9 @@ class CustomCommands {
   exex_custom_command = async(client, channel, userState, message) =>
   {
     // "@user !command" - redirects the reply to the mentioned user instead of whoever actually
-    // typed the message. Twitch's own reply-threading (the third client.say arg) only targets a
-    // specific message id, and we have no recent message FROM the mentioned user to thread onto,
-    // so the redirect is a plain @mention prefixed onto the reply text instead. Only recognized
-    // when what follows the mention is actually a command (`!...`), so an ordinary "@user hey"
-    // chat line is left alone. mentionTarget stays null (no redirect) otherwise.
-    const mentionMatch = message.match(/^@(\w+)\s+(!.+)$/s);
-    const mentionTarget = mentionMatch ? mentionMatch[1] : null;
-    const rest = mentionMatch ? mentionMatch[2] : message;
+    // typed the message - see shared/mentionRedirect.js for the full rationale (this is the
+    // pattern's original home; other built-in commands in msgHandle.js reuse the same helper).
+    const { mentionTarget, rest } = parseMentionRedirect(message);
 
     const lowerRest = rest.toLocaleLowerCase();
     for (const trigger of this.CommandsKeysList[channel]) {
@@ -669,13 +665,10 @@ class CustomCommands {
             var broadcasterId = this.getBroadcasterId(channel);
             if (broadcasterId) TwitchChatAPI.pinMessage(broadcasterId, messageId);
           }
-        } else if (mentionTarget) {
-          // Redirected reply - plain @mention text, no reply-threading to the caller.
-          await client.say(channel, `@${mentionTarget} ${commandResult}`);
         } else {
-          // Neither announce nor pin - reply directly to whoever triggered it instead of
-          // posting a bare line, so the response reads as addressed to them (Twitch reply threading).
-          await client.say(channel, commandResult, userState["id"]);
+          // Neither announce nor pin - reply to whoever triggered it (Twitch reply-threading),
+          // or to the mentioned user via a plain @mention prefix if this was "@user !command".
+          await sayMaybeMention(client, channel, mentionTarget, userState["id"], commandResult);
         }
         this.lastCustomCommand.set(channel, new Date().getTime());
         // someone just said it in chat - push the next auto-send a full period out

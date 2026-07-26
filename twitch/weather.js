@@ -1,20 +1,28 @@
 const axios = require('axios');
 
-// wttr.in weatherCode groups (worldweatheronline codes) mapped to a representative emoji.
+// wttr.in weatherCode groups (worldweatheronline codes), shared between the emoji map and
+// buildAdvice() below so the two never drift out of sync with each other.
+const CODE_GROUPS = {
+  clear: ['113'],
+  partlyCloudy: ['116'],
+  cloudy: ['119', '122'],
+  fog: ['143', '248', '260'],
+  storm: ['200', '386', '389', '392', '395'],
+  snow: ['227', '230', '323', '326', '329', '332', '335', '338', '368', '371', '374', '377'],
+  rain: [
+    '176', '263', '266', '293', '296', '299', '302', '305', '308',
+    '311', '314', '317', '320', '350', '353', '356', '359', '362', '365',
+  ],
+};
+
 const WEATHER_CODE_EMOJI = [
-  { codes: ['113'], emoji: '☀️' },
-  { codes: ['116'], emoji: '⛅' },
-  { codes: ['119', '122'], emoji: '☁️' },
-  { codes: ['143', '248', '260'], emoji: '🌫️' },
-  { codes: ['200', '386', '389', '392', '395'], emoji: '⛈️' },
-  { codes: ['227', '230', '323', '326', '329', '332', '335', '338', '368', '371', '374', '377'], emoji: '❄️' },
-  {
-    codes: [
-      '176', '263', '266', '293', '296', '299', '302', '305', '308',
-      '311', '314', '317', '320', '350', '353', '356', '359', '362', '365',
-    ],
-    emoji: '🌧️',
-  },
+  { codes: CODE_GROUPS.clear, emoji: '☀️' },
+  { codes: CODE_GROUPS.partlyCloudy, emoji: '⛅' },
+  { codes: CODE_GROUPS.cloudy, emoji: '☁️' },
+  { codes: CODE_GROUPS.fog, emoji: '🌫️' },
+  { codes: CODE_GROUPS.storm, emoji: '⛈️' },
+  { codes: CODE_GROUPS.snow, emoji: '❄️' },
+  { codes: CODE_GROUPS.rain, emoji: '🌧️' },
 ];
 
 // worldweatheronline uses the same numeric code for a condition at any hour - "clear" is 113
@@ -22,7 +30,7 @@ const WEATHER_CODE_EMOJI = [
 // (e.g. "..._night.png"). Only the two sky-only codes actually look wrong without that: a
 // literal sun at 3am - swapped for the real moon phase (from the same response's astronomy
 // block) rather than a single fixed 🌙, since "clear at night" already tells you which phase.
-const NIGHT_OVERRIDE_CODES = ['113', '116'];
+const NIGHT_OVERRIDE_CODES = [...CODE_GROUPS.clear, ...CODE_GROUPS.partlyCloudy];
 
 const MOON_PHASE_EMOJI = {
   'new moon': '🌑',
@@ -37,6 +45,132 @@ const MOON_PHASE_EMOJI = {
 
 function moonPhaseEmoji(phase) {
   return MOON_PHASE_EMOJI[(phase || '').toLowerCase()] || '🌙';
+}
+
+function pick(options) {
+  return options[Math.floor(Math.random() * options.length)];
+}
+
+// Thresholds are the WHO UV scale / general meteorological convention, not tuned to any city.
+// Each triggered scenario picks randomly from 2+ phrasings so repeat calls for the same
+// weather don't read as a canned, identical reply every time.
+function buildAdvice({ tempC, feelsLikeC, humidity, uvIndex, windspeedKmph, pressure, visibility, weatherCode, isNight }) {
+  const temp = Number(tempC);
+  const feels = Number(feelsLikeC);
+  const hum = Number(humidity);
+  const uv = Number(uvIndex);
+  const wind = Number(windspeedKmph);
+  const pres = Number(pressure);
+  const vis = Number(visibility);
+  const advice = [];
+
+  if (Number.isFinite(uv) && uv >= 8) {
+    advice.push(pick([
+      '🕶️ экстремальный УФ-индекс — обязательно очки и крем от загара!',
+      '🔥 солнце сегодня максимально агрессивное — прячьтесь в тень в полдень',
+    ]));
+  } else if (Number.isFinite(uv) && uv >= 6) {
+    advice.push(pick([
+      '🕶️ высокий УФ-индекс — не забудьте очки и крем от загара',
+      '🕶️ солнце сегодня злое, солнцезащитный крем не помешает',
+    ]));
+  }
+
+  if (Number.isFinite(feels) && Number.isFinite(temp)) {
+    if (feels - temp <= -5) {
+      advice.push(pick([
+        '🥶 ощущается холоднее, чем есть — одевайтесь теплее',
+        '🥶 ветер выдувает всё тепло, кутайтесь получше',
+      ]));
+    } else if (feels - temp >= 5) {
+      advice.push(pick([
+        '🥵 ощущается жарче, чем есть, из-за влажности',
+        '🥵 влажность делает жару тяжелее переносимой',
+      ]));
+    }
+  }
+
+  if (Number.isFinite(temp) && temp >= 35) {
+    advice.push(pick([
+      '🔥 сильная жара — избегайте солнца в полдень и пейте больше воды',
+      '🥵 настоящее пекло на улице, поберегите себя',
+    ]));
+  } else if (Number.isFinite(temp) && temp <= -10) {
+    advice.push(pick([
+      '🧊 сильный мороз — прикройте открытые участки кожи',
+      '🥶 колотун на улице, одевайтесь в несколько слоёв',
+    ]));
+  }
+
+  if (Number.isFinite(wind) && wind >= 40) {
+    advice.push(pick([
+      `💨 сильный ветер (${windspeedKmph} км/ч)`,
+      '💨 держите шапку — ветер разгулялся не на шутку',
+    ]));
+  }
+
+  if (Number.isFinite(hum) && hum >= 85) {
+    advice.push(pick([
+      '💧 очень высокая влажность — на улице может быть душно',
+      '💧 воздух сегодня как в бане, дышать тяжеловато',
+    ]));
+  } else if (Number.isFinite(hum) && hum <= 20) {
+    advice.push(pick([
+      '🏜️ низкая влажность — не забудьте попить воды',
+      '🏜️ воздух сухой, увлажните кожу и губы',
+    ]));
+  }
+
+  if (Number.isFinite(pres) && pres < 1000) {
+    advice.push(pick([
+      '🤕 низкое давление — метеочувствительным может быть тяжеловато',
+      '📉 давление понижено, если голова побаливает — не удивляйтесь',
+    ]));
+  } else if (Number.isFinite(pres) && pres > 1025) {
+    advice.push(pick([
+      '📈 давление повышенное — погода стабильная',
+      '☀️ высокое давление — ждём ясную устойчивую погоду',
+    ]));
+  }
+
+  if (CODE_GROUPS.storm.includes(weatherCode)) {
+    advice.push(pick([
+      '⛈️ гроза — лучше переждать дома',
+      '⛈️ молнии рядом — отключите технику из розетки на всякий случай',
+    ]));
+  } else if (CODE_GROUPS.snow.includes(weatherCode)) {
+    advice.push(pick([
+      '❄️ снег — дороги скользкие, будьте осторожны',
+      '☃️ самое время для снежков, но одевайтесь теплее',
+    ]));
+  } else if (CODE_GROUPS.rain.includes(weatherCode)) {
+    advice.push(pick([
+      '☔ дождь — возьмите зонт',
+      '☔ на улице мокро, не забудьте зонт',
+    ]));
+  } else if (CODE_GROUPS.fog.includes(weatherCode) || (Number.isFinite(vis) && vis <= 2)) {
+    advice.push(pick([
+      '🌫️ туман — видимость плохая, за рулём будьте внимательнее',
+      '🌫️ видимость низкая, включайте фары даже днём',
+    ]));
+  }
+
+  const isClearOrPartly = CODE_GROUPS.clear.includes(weatherCode) || CODE_GROUPS.partlyCloudy.includes(weatherCode);
+  if (!isNight && isClearOrPartly && Number.isFinite(hum) && hum <= 45 && Number.isFinite(wind) && wind >= 5 && wind <= 25) {
+    advice.push(pick([
+      '🧺 отличный день, чтобы посушить бельё на улице',
+      '👕 солнце и ветерок — идеально для сушки белья на улице',
+    ]));
+  }
+
+  if (isNight && CODE_GROUPS.clear.includes(weatherCode)) {
+    advice.push(pick([
+      '🔭 небо чистое — хороший вечер для звёзд',
+      '✨ ясное небо ночью, гляньте наверх — звёзды сегодня видны отлично',
+    ]));
+  }
+
+  return advice;
 }
 
 function emojiForCode(code, isNight, moonPhase) {
@@ -71,11 +205,26 @@ async function getWeather(city) {
   const moonPhase = data.weather?.[0]?.astronomy?.[0]?.moon_phase;
   const isMoonEmoji = isNight && NIGHT_OVERRIDE_CODES.includes(current.weatherCode);
 
+  const feelsLikeC = current.FeelsLikeC;
+  const humidity = current.humidity;
+  const uvIndex = current.uvIndex;
+  const windspeedKmph = current.windspeedKmph;
+  const pressure = current.pressure;
+  const visibility = current.visibility;
+
   return {
     description,
     tempC,
+    feelsLikeC,
+    humidity,
+    uvIndex,
+    windspeedKmph,
     emoji: emojiForCode(current.weatherCode, isNight, moonPhase),
     isMoonEmoji,
+    advice: buildAdvice({
+      tempC, feelsLikeC, humidity, uvIndex, windspeedKmph, pressure, visibility,
+      weatherCode: current.weatherCode, isNight,
+    }),
   };
 }
 
