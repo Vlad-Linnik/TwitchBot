@@ -5,12 +5,6 @@ const streamStatus = require('./streamStatus.js');
 const moderators = require('./moderators.js');
 const emoteSyncScheduler = require('./emoteSyncScheduler.js');
 
-// How often "today"'s ModeratorStatistics row is refreshed while the stream is live - otherwise
-// recordDailyModeratorStats only ever fires on the offline transition, so the web panel's
-// day-period view stays empty for the entire duration of an ongoing stream. Re-running it mid-day
-// is safe: it's an idempotent upsert of the day's totals-so-far, not a running counter.
-const HOURLY_STATS_REFRESH_MS = 60 * 60 * 1000;
-
 // ensureOpenSession's staleAfterMs: below this gap since the last recorded viewer sample, a bot
 // restart (crash/redeploy) mid-stream resumes the same StreamSessions row instead of splitting
 // the web panel's "Статистика стрима" chart into a new stream date. Above it, the session is
@@ -30,7 +24,6 @@ class ModActivityTracker {
         this.lastCheckTime = null; // used to compute real elapsed delta between checks
         this.lastStatsDate = null; // local calendar date (toDateString()) daily mod stats were last recorded for,
                                     // guards against recomputing every time the stream flaps offline within the same day
-        this.lastHourlyStatsAt = 0; // Date.now() of the last mid-stream ModeratorStatistics refresh
     }
 
     // Returns the live stream object (truthy, includes game_name/game_id) when live, `false`
@@ -136,7 +129,6 @@ class ModActivityTracker {
             const justWentLive = !this.isLive;
             if (justWentLive) {
                 console.log(`[ModTracker] [${this.channelLogin}] Stream started`);
-                this.lastHourlyStatsAt = 0; // get today's row on the board promptly, not up to an hour late
             }
             this.isLive = true;
 
@@ -147,11 +139,16 @@ class ModActivityTracker {
             ChatStats.recordStreamSample(this.broadcasterId, new Date(now), streamInfo.viewer_count, streamInfo.game_name || null)
                 .catch(err => console.error('[ModTracker] recordStreamSample error:', err));
 
-            if (now - this.lastHourlyStatsAt >= HOURLY_STATS_REFRESH_MS) {
-                this.lastHourlyStatsAt = now;
-                ChatStats.recordDailyModeratorStats(this.broadcasterId, this.channelLogin, [...currentModerators])
-                    .catch(err => console.error('[ModTracker] hourly recordDailyModeratorStats error:', err));
-            }
+            // Refresh "today"'s ModeratorStatistics row on every live tick, not just the
+            // offline transition - otherwise the web panel's day-period view stays empty for
+            // the entire stream: the row this call would write right as the stream goes live
+            // is all-zero (nobody's chatted/moderated in the first instant) and gets skipped
+            // (see recordDailyModeratorStats), so without a mid-stream refresh nothing appears
+            // until either an hour passed or the stream ends. This upsert is idempotent (it
+            // recomputes the day's totals-so-far, not a running counter), so re-running it
+            // every ~intervalMs is safe - it's the same per-tick cost as updateModUpTime above.
+            ChatStats.recordDailyModeratorStats(this.broadcasterId, this.channelLogin, [...currentModerators])
+                .catch(err => console.error('[ModTracker] mid-stream recordDailyModeratorStats error:', err));
 
             // Piggyback the emote re-sync schedule on this poll: it already owns the
             // offline->live transition and never reaches here on an unknown (null) status.
