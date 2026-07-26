@@ -251,14 +251,8 @@ async function getWeather(city) {
   const pressure = current.pressure;
   const visibility = current.visibility;
 
-  // wttr.in resolves arbitrary/unrecognized input to its nearest real match (e.g. a city name
-  // fuzzy-matched from unrelated text) - report that resolved place back rather than echoing
-  // the user's original query, since the two can differ wildly.
-  const resolvedLocation = data.nearest_area?.[0]?.areaName?.[0]?.value || null;
-
   return {
     description,
-    resolvedLocation,
     tempC,
     feelsLikeC,
     humidity,
