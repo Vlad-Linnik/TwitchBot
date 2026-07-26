@@ -170,10 +170,9 @@ function buildAdvice({ tempC, feelsLikeC, humidity, uvIndex, windspeedKmph, pres
   }
 
   const isClearOrPartly = CODE_GROUPS.clear.includes(weatherCode) || CODE_GROUPS.partlyCloudy.includes(weatherCode);
-  // These conditions (clear/partly + low humidity + light wind) are common, so this fired on
-  // most sunny replies - gate it to a third of those, and pool it with other "nice day" tips
-  // (rather than a separate roll each) so two similar suggestions don't stack in one reply.
-  if (!isNight && isClearOrPartly && Number.isFinite(hum) && hum <= 45 && Number.isFinite(wind) && wind >= 5 && wind <= 25 && Math.random() < 0.33) {
+  // Pooled into one pick() (rather than a separate push per tip) so two similar "nice day"
+  // suggestions don't stack in one reply.
+  if (!isNight && isClearOrPartly && Number.isFinite(hum) && hum <= 45 && Number.isFinite(wind) && wind >= 5 && wind <= 25) {
     advice.push(pick([
       '🧺 отличный день, чтобы посушить бельё на улице',
       '👕 солнце и ветерок — идеально для сушки белья на улице',
