@@ -7,6 +7,9 @@ const CODE_GROUPS = {
   partlyCloudy: ['116'],
   cloudy: ['119', '122'],
   fog: ['143', '248', '260'],
+  // Not a standard worldweatheronline code (those top out at 395), but wttr.in returns it for
+  // smoke/smog conditions - kept separate from fog since "туман" is the wrong description for it.
+  haze: ['149'],
   storm: ['200', '386', '389', '392', '395'],
   snow: ['227', '230', '323', '326', '329', '332', '335', '338', '368', '371', '374', '377'],
   rain: [
@@ -20,6 +23,7 @@ const WEATHER_CODE_EMOJI = [
   { codes: CODE_GROUPS.partlyCloudy, emoji: '⛅' },
   { codes: CODE_GROUPS.cloudy, emoji: '☁️' },
   { codes: CODE_GROUPS.fog, emoji: '🌫️' },
+  { codes: CODE_GROUPS.haze, emoji: '😷' },
   { codes: CODE_GROUPS.storm, emoji: '⛈️' },
   { codes: CODE_GROUPS.snow, emoji: '❄️' },
   { codes: CODE_GROUPS.rain, emoji: '🌧️' },
@@ -77,10 +81,10 @@ function buildAdvice({ tempC, feelsLikeC, humidity, uvIndex, windspeedKmph, pres
   }
 
   if (Number.isFinite(feels) && Number.isFinite(temp)) {
-    if (feels - temp <= -5) {
+    if (feels - temp <= -5 && temp <= 20) {
       advice.push(pick([
         '🥶 ощущается холоднее, чем есть — одевайтесь теплее',
-        '🥶 ветер выдувает всё тепло, кутайтесь получше',
+        '💨 ветер выдувает всё тепло, кутайтесь получше',
       ]));
     } else if (feels - temp >= 5) {
       advice.push(pick([
@@ -109,10 +113,15 @@ function buildAdvice({ tempC, feelsLikeC, humidity, uvIndex, windspeedKmph, pres
     ]));
   }
 
-  if (Number.isFinite(hum) && hum >= 85) {
+  if (Number.isFinite(hum) && hum >= 85 && Number.isFinite(temp) && temp >= 20) {
     advice.push(pick([
       '💧 очень высокая влажность — на улице может быть душно',
       '💧 воздух сегодня как в бане, дышать тяжеловато',
+    ]));
+  } else if (Number.isFinite(hum) && hum >= 85 && Number.isFinite(temp) && temp < 20) {
+    advice.push(pick([
+      '💧 очень высокая влажность — на улице сыро и промозгло',
+      '💧 воздух сырой, холод ощущается сильнее обычного',
     ]));
   } else if (Number.isFinite(hum) && hum <= 20) {
     advice.push(pick([
@@ -148,6 +157,11 @@ function buildAdvice({ tempC, feelsLikeC, humidity, uvIndex, windspeedKmph, pres
       '☔ дождь — возьмите зонт',
       '☔ на улице мокро, не забудьте зонт',
     ]));
+  } else if (CODE_GROUPS.haze.includes(weatherCode)) {
+    advice.push(pick([
+      '😷 смог — воздух грязный, лучше меньше времени проводить на улице',
+      '😷 дымка от смога, людям с астмой/аллергией лучше выйти в маске',
+    ]));
   } else if (CODE_GROUPS.fog.includes(weatherCode) || (Number.isFinite(vis) && vis <= 2)) {
     advice.push(pick([
       '🌫️ туман — видимость плохая, за рулём будьте внимательнее',
@@ -156,10 +170,16 @@ function buildAdvice({ tempC, feelsLikeC, humidity, uvIndex, windspeedKmph, pres
   }
 
   const isClearOrPartly = CODE_GROUPS.clear.includes(weatherCode) || CODE_GROUPS.partlyCloudy.includes(weatherCode);
-  if (!isNight && isClearOrPartly && Number.isFinite(hum) && hum <= 45 && Number.isFinite(wind) && wind >= 5 && wind <= 25) {
+  // These conditions (clear/partly + low humidity + light wind) are common, so this fired on
+  // most sunny replies - gate it to a third of those, and pool it with other "nice day" tips
+  // (rather than a separate roll each) so two similar suggestions don't stack in one reply.
+  if (!isNight && isClearOrPartly && Number.isFinite(hum) && hum <= 45 && Number.isFinite(wind) && wind >= 5 && wind <= 25 && Math.random() < 0.33) {
     advice.push(pick([
       '🧺 отличный день, чтобы посушить бельё на улице',
       '👕 солнце и ветерок — идеально для сушки белья на улице',
+      '🚶 отличная погода, чтобы прогуляться на улице',
+      '🌤️ грех сидеть дома в такую погоду — сходите погуляйте',
+      '🏊 отличный повод сходить поплавать',
     ]));
   }
 
