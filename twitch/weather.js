@@ -1,4 +1,5 @@
 const axios = require('axios');
+const describeError = require('../shared/describeError.js');
 
 // wttr.in weatherCode groups (worldweatheronline codes), shared between the emoji map and
 // buildAdvice() below so the two never drift out of sync with each other.
@@ -218,20 +219,40 @@ function emojiForCode(code, isNight, moonPhase) {
   return match ? match.emoji : '🌡️';
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // wttr.in needs no signup/API key - a plain city-name lookup against its j1 JSON format.
 // lang=ru additionally asks it to translate the condition text into current_condition[0].lang_ru.
-async function getWeather(city) {
-  let data;
+//
+// wttr.in occasionally resets the connection or stalls past the 15s global axios timeout
+// (../botInitInfo.js) under no fault of the bot's own - one retry after a short delay is enough
+// to ride out that flakiness without piling up a long chain of attempts on a chat command a user
+// is waiting on. Retried only when no response ever arrived (err.response is unset): a real HTTP
+// response - e.g. the 500 "location not found" case below - means wttr.in is up and answering, so
+// retrying it would just burn time reproducing the same result.
+async function fetchWeatherJson(city, attempt = 1) {
   try {
-    ({ data } = await axios.get(`https://wttr.in/${encodeURIComponent(city)}`, {
+    const { data } = await axios.get(`https://wttr.in/${encodeURIComponent(city)}`, {
       params: { format: 'j1', lang: 'ru' },
-    }));
+    });
+    return data;
   } catch (err) {
     // An unrecognized city name is a 500 with a "location not found" plaintext body,
     // not a distinct 404 - treat it the same as "no data" instead of a hard failure.
     if (err.response?.status === 500 && /location not found/i.test(err.response.data)) return null;
+    if (!err.response && attempt === 1) {
+      console.error(`[Weather] Transient failure fetching "${city}", retrying once:`, describeError(err));
+      await delay(1500);
+      return fetchWeatherJson(city, attempt + 1);
+    }
     throw err;
   }
+}
+
+async function getWeather(city) {
+  const data = await fetchWeatherJson(city);
 
   const current = data?.current_condition?.[0];
   if (!current) return null;

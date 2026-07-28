@@ -23,6 +23,7 @@ const channelSettings = require("../config/channelSettings.js");
 const { syncChannelEmoteSet } = require("../sevenTv/SevenTvEmotes.js");
 const Clips = require("../twitch/clips.js");
 const Weather = require("../twitch/weather.js");
+const describeError = require("../shared/describeError.js");
 const { parseMentionRedirect, sayMaybeMention } = require("../shared/mentionRedirect.js");
 
 // timers - per-channel maps so a cooldown in one channel doesn't block another;
@@ -304,7 +305,7 @@ async function weather(client, channel, userState, message) {
     const advicePart = result.advice?.length ? ` — ${result.advice.join(' ')}` : '';
     sayMaybeMention(client, channel, mentionTarget, userState["id"], `Сейчас погода в ${city}: ${result.description} ${emojiPart}, ${result.tempC}°C${humidityPart}${advicePart}`);
   } catch (err) {
-    console.error('[Weather] Failed to fetch weather:', err.message);
+    console.error('[Weather] Failed to fetch weather:', describeError(err));
     sayMaybeMention(client, channel, mentionTarget, userState["id"], `ошибка получения погоды VoHiYo `);
   }
   return 1;
