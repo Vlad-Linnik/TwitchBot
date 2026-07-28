@@ -17,6 +17,7 @@ const botInitInfo = require("../botInitInfo.js");
 const {muteDuelAccept, muteDuel, timeChanger} = require("../games/muteDuel.js");
 const {customCommands, counter} = require("./CustomCommands.js");
 const Twitch_ban_API = require("../twitch/TwitchBanAPI.js");
+const { longBan, cancelLongBan, listLongBans } = require("./longBan.js");
 const Normalization = require("../shared/Normalization.js");
 const channelSettings = require("../config/channelSettings.js");
 const { syncChannelEmoteSet } = require("../sevenTv/SevenTvEmotes.js");
@@ -318,6 +319,7 @@ async function execCommands(client, channel, userState, message) {
   const asyncCommandsCheck = [
     customCommands.getAllCustomCommands,
     get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,randomClip,weather,
+    longBan, cancelLongBan, listLongBans,
     customCommands.addCommand,
     customCommands.deleteCustomCommand,
     customCommands.setCommandTimer,
