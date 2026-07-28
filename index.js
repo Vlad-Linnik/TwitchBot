@@ -20,6 +20,7 @@ async function bootstrap() {
   const { customCommands } = require('./commands/CustomCommands.js');
   const emoteSyncScheduler = require('./twitch/emoteSyncScheduler.js');
   const channelJoinScheduler = require('./twitch/channelJoinScheduler.js');
+  const longBanScheduler = require('./twitch/longBanScheduler.js');
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
   const describeError = require('./shared/describeError.js');
@@ -237,6 +238,8 @@ async function bootstrap() {
     // Picks up channels registered/enabled AFTER this boot (scripts/seedChannel.js, or an
     // approved /request-bot request) without needing a restart - see channelJoinScheduler.js.
     channelJoinScheduler.start(client);
+    // Renews/unbans !longban entries past Twitch's native 2-week timeout cap - see longBanScheduler.js.
+    longBanScheduler.start(client);
   }
 
   await start();
