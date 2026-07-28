@@ -19,6 +19,62 @@ const CODE_GROUPS = {
   ],
 };
 
+// wttr.in's lang=ru translation (current.lang_ru) is inconsistent - some conditions come back
+// untranslated, which used to fall straight through to the English weatherDesc with no way to
+// notice. Own translation table keyed by the same worldweatheronline codes as CODE_GROUPS, so the
+// description is never at the mercy of wttr.in's translation coverage for that call.
+const WEATHER_CODE_DESCRIPTION_RU = {
+  113: 'Ясно',
+  116: 'Переменная облачность',
+  119: 'Облачно',
+  122: 'Пасмурно',
+  143: 'Дымка',
+  149: 'Смог',
+  176: 'Местами дождь',
+  179: 'Местами снег',
+  182: 'Местами мокрый снег',
+  185: 'Местами ледяная морось',
+  200: 'Возможна гроза',
+  227: 'Позёмок',
+  230: 'Буран',
+  248: 'Туман',
+  260: 'Изморозь',
+  263: 'Местами лёгкая морось',
+  266: 'Лёгкая морось',
+  281: 'Ледяная морось',
+  284: 'Сильная ледяная морось',
+  293: 'Местами небольшой дождь',
+  296: 'Небольшой дождь',
+  299: 'Временами умеренный дождь',
+  302: 'Умеренный дождь',
+  305: 'Временами сильный дождь',
+  308: 'Сильный дождь',
+  311: 'Небольшой ледяной дождь',
+  314: 'Умеренный или сильный ледяной дождь',
+  317: 'Небольшой мокрый снег',
+  320: 'Умеренный или сильный мокрый снег',
+  323: 'Местами небольшой снег',
+  326: 'Небольшой снег',
+  329: 'Местами умеренный снег',
+  332: 'Умеренный снег',
+  335: 'Местами сильный снег',
+  338: 'Сильный снег',
+  350: 'Ледяная крупа',
+  353: 'Небольшой ливневый дождь',
+  356: 'Умеренный или сильный ливневый дождь',
+  359: 'Ливень',
+  362: 'Небольшой ливневый мокрый снег',
+  365: 'Умеренный или сильный ливневый мокрый снег',
+  368: 'Небольшой снегопад',
+  371: 'Умеренный или сильный снегопад',
+  374: 'Небольшая ледяная крупа',
+  377: 'Умеренная или сильная ледяная крупа',
+  386: 'Местами гроза с небольшим дождём',
+  389: 'Умеренная или сильная гроза с дождём',
+  392: 'Местами гроза со снегом',
+  395: 'Умеренная или сильная гроза со снегом',
+};
+
 const WEATHER_CODE_EMOJI = [
   { codes: CODE_GROUPS.clear, emoji: '☀️' },
   { codes: CODE_GROUPS.partlyCloudy, emoji: '⛅' },
@@ -257,9 +313,14 @@ async function getWeather(city) {
   const current = data?.current_condition?.[0];
   if (!current) return null;
 
-  const description = current.lang_ru?.[0]?.value || current.weatherDesc?.[0]?.value;
+  const rawDescription = current.lang_ru?.[0]?.value || current.weatherDesc?.[0]?.value;
+  const description = WEATHER_CODE_DESCRIPTION_RU[current.weatherCode] || rawDescription;
   const tempC = current.temp_C;
   if (!description || tempC === undefined) return null;
+
+  if (description === rawDescription && current.weatherDesc?.[0]?.value && !current.lang_ru?.[0]?.value) {
+    console.error(`[Weather] No RU translation for weatherCode ${current.weatherCode} ("${rawDescription}") - add it to WEATHER_CODE_DESCRIPTION_RU`);
+  }
 
   const isNight = /night/i.test(current.weatherIconUrl?.[0]?.value || '');
   const moonPhase = data.weather?.[0]?.astronomy?.[0]?.moon_phase;
