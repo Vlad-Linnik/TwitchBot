@@ -95,15 +95,19 @@ async function longBan(client, channel, userState, message) {
 
   const signature = settings.commands.longban.signature;
   const rest = message.slice(signature.length).trim();
-  const argMatch = /^@?(\S+)\s+(\S+)\s+(timeout|ban)(?:\s+([\s\S]+))?$/i.exec(rest);
+  // mode is optional - defaults to 'timeout' (see below). The \b after (timeout|ban) matters: it
+  // stops "banned for spam" (reason text that merely STARTS with "ban") from being misread as an
+  // explicit ban mode - \b only matches where a word character is followed by a non-word one (or
+  // the string ends), so "ban" immediately followed by "ned" never qualifies.
+  const argMatch = /^@?(\S+)\s+(\S+)(?:\s+(timeout|ban)\b)?(?:\s+([\s\S]+))?$/i.exec(rest);
   if (!argMatch) {
-    client.say(channel, `Ожидалось: ${signature} пользователь длительность(30d/6w/2m/1y, число секунд, или дата ДД.ММ.ГГГГ) timeout|ban [причина] VoHiYo `, userState["id"]);
+    client.say(channel, `Ожидалось: ${signature} <user> <время> [timeout|ban] <причина> VoHiYo `, userState["id"]);
     return 1;
   }
 
   const [, targetLoginRaw, durationToken, modeRaw, reasonRaw] = argMatch;
   const targetLogin = targetLoginRaw.toLowerCase();
-  const mode = modeRaw.toLowerCase();
+  const mode = modeRaw ? modeRaw.toLowerCase() : 'timeout';
   const reason = reasonRaw ? reasonRaw.trim() : "No reason";
 
   if (targetLogin === botInitInfo.settings["username"].toLowerCase()) return 1;
