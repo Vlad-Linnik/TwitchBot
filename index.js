@@ -181,8 +181,10 @@ async function bootstrap() {
         return;
       }
 
-      // ! commands
-      if (message.match(/^!|^#/)) {
+      // ! commands - also lets "@user !command" through (see shared/mentionRedirect.js), which
+      // otherwise starts with @ and would never reach execCommands despite its handlers
+      // supporting the redirect.
+      if (message.match(/^!|^#|^@\w+\s+!/)) {
         // execCommands is async - must be awaited. An unawaited call here used to make this `if`
         // always truthy (a Promise is always truthy), so it "worked" by accident: every !/#
         // message returned early regardless of whether any handler actually matched.
