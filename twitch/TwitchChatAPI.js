@@ -1,5 +1,6 @@
 const axios = require("axios");
 const botInitInfo = require("../botInitInfo.js");
+const describeError = require("../shared/describeError.js");
 
 // PUT /helix/chat/pins - pins until the stream ends (no duration_seconds passed).
 // Uses the moderator user token (like TwitchBanAPI) since this requires the
@@ -20,7 +21,7 @@ async function pinMessage(broadcasterId, messageId) {
   try {
     await axios.put(url, null, { headers, params });
   } catch (error) {
-    console.error("[API] pinMessage error:", error.response?.data || error.message);
+    console.error("[API] pinMessage error:", describeError(error));
   }
 }
 
@@ -52,7 +53,7 @@ async function sendAnnouncement(broadcasterId, message, color = "primary") {
     await axios.post(url, body, { headers, params });
     return true;
   } catch (error) {
-    console.error("[API] sendAnnouncement error:", error.response?.data || error.message);
+    console.error("[API] sendAnnouncement error:", describeError(error));
     return false;
   }
 }

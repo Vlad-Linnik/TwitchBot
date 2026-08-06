@@ -14,6 +14,7 @@ const axios = require('axios');
 const botInitInfo = require("../botInitInfo.js");
 const ChatStats = require('../db/chatStats.js');
 const moderators = require('./moderators.js');
+const describeError = require('../shared/describeError.js');
 
 const DEFAULT_URL = 'wss://eventsub.wss.twitch.tv/ws';
 const MAX_RECONNECT_DELAY_MS = 30000;
@@ -52,7 +53,7 @@ class EventSubClient {
 
         if (this.sessionId) {
             this.subscribeChannel(id).catch(err =>
-                console.error(`[EventSub] [${this.label(id)}] Subscribe failed:`, err.message));
+                console.error(`[EventSub] [${this.label(id)}] Subscribe failed:`, describeError(err)));
         }
         this.connect();
         this.startSweep();
@@ -152,7 +153,7 @@ class EventSubClient {
             console.log(`[EventSub] Connection closed (code ${code}).`);
             this.scheduleReconnect();
         });
-        socket.on('error', (err) => console.error('[EventSub] WebSocket error:', err.message));
+        socket.on('error', (err) => console.error('[EventSub] WebSocket error:', describeError(err)));
     }
 
     // A silently dead socket now costs every channel its moderation events at once, not just one,
@@ -196,7 +197,7 @@ class EventSubClient {
         if (this.sweepTimer) return;
         this.sweepTimer = setInterval(() => {
             if (!this.sessionId) return;
-            this.subscribeAll().catch(err => console.error('[EventSub] Resubscribe sweep failed:', err.message));
+            this.subscribeAll().catch(err => console.error('[EventSub] Resubscribe sweep failed:', describeError(err)));
         }, RESUBSCRIBE_SWEEP_MS);
         // Don't hold the event loop open - same convention as CustomCommands.startAutoRefresh.
         this.sweepTimer.unref?.();
@@ -208,7 +209,7 @@ class EventSubClient {
             try {
                 await this.subscribeChannel(channelId);
             } catch (err) {
-                console.error(`[EventSub] [${this.label(channelId)}] Subscribe failed:`, err.message);
+                console.error(`[EventSub] [${this.label(channelId)}] Subscribe failed:`, describeError(err));
             }
         }
     }
@@ -257,7 +258,7 @@ class EventSubClient {
                 console.error(`[EventSub] [${this.label(channelId)}] Transport limit hit - more than one EventSub connection is open for this token:`, data);
                 return;
             }
-            console.error(`[EventSub] [${this.label(channelId)}] Subscribtion Error:`, data || error.message);
+            console.error(`[EventSub] [${this.label(channelId)}] Subscribtion Error:`, describeError(error));
         }
     }
 
@@ -271,7 +272,7 @@ class EventSubClient {
                 }
             });
         } catch (err) {
-            console.error(`[EventSub] Failed to delete subscription ${subscriptionId}:`, err.response?.data || err.message);
+            console.error(`[EventSub] Failed to delete subscription ${subscriptionId}:`, describeError(err));
         }
     }
 

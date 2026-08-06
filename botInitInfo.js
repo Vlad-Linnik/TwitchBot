@@ -16,6 +16,13 @@ const channelsRepo = require('./db/channelsRepo.js');
 const HTTP_TIMEOUT_MS = 15000;
 axios.defaults.timeout = HTTP_TIMEOUT_MS;
 
+// No explicit http(s).Agent is set here on purpose. Node 19 flipped `http(s).globalAgent` to
+// `keepAlive: true`, axios passes no agent of its own and so inherits it, and prod runs Node 20 -
+// verified empirically (three sequential Helix calls reuse the same local port). Pinning an agent
+// with the same options would be a no-op. Worth re-checking only if the box's Node is ever
+// downgraded below 19, where the default is the opposite and every Helix call - including each
+// chat message send - would open a fresh TCP+TLS connection.
+
 
 const settings = {
   "username": process.env.BotUsername,
