@@ -153,10 +153,29 @@ async function longBan(client, channel, userState, message) {
     await TwitchBanAPI.timeout(targetUser.id, appliedSeconds, channelId, reason);
     const coversRemainder = appliedSeconds * 1000 >= durationMs;
     const nextRenewalAt = coversRemainder ? unbanAt : new Date(now + appliedSeconds * 1000 - RENEWAL_SAFETY_MARGIN_MS);
-    await longBansRepo.create({ ...baseDoc, nextRenewalAt });
+    try {
+      await longBansRepo.create({ ...baseDoc, nextRenewalAt });
+    } catch (err) {
+      if (err.code === 'DUPLICATE_OCCUPYING') {
+        // A second !longban for the same user landed between our findActive() check and this
+        // insert (e.g. two mods racing). The timeout above already applied - just skip the
+        // duplicate DB row rather than crashing the message handler.
+        client.say(channel, `@${targetUser.login} уже поставлен под long-ban другой командой VoHiYo `, userState["id"]);
+        return 1;
+      }
+      throw err;
+    }
   } else {
     await TwitchBanAPI.ban(targetUser.id, channelId, reason);
-    await longBansRepo.create({ ...baseDoc, nextRenewalAt: unbanAt });
+    try {
+      await longBansRepo.create({ ...baseDoc, nextRenewalAt: unbanAt });
+    } catch (err) {
+      if (err.code === 'DUPLICATE_OCCUPYING') {
+        client.say(channel, `@${targetUser.login} уже поставлен под long-ban другой командой VoHiYo `, userState["id"]);
+        return 1;
+      }
+      throw err;
+    }
   }
 
   const modeText = mode === 'timeout' ? 'таймаут, чат виден' : 'бан, чат скрыт';

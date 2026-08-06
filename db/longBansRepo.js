@@ -30,6 +30,14 @@ async function ensureCollection() {
     await collection.createIndex({ status: 1 });
     // create()'s "already occupied" check and cancel/list lookups by channel+user.
     await collection.createIndex({ channelId: 1, userId: 1, status: 1 });
+    // Enforces "only one occupying long-ban per user per channel" at the database level, closing
+    // the TOCTOU gap between findActive()'s check and create()'s insert (e.g. two near-simultaneous
+    // !longban triggers for the same user). Partial so completed/cancelled/failed docs for the same
+    // user can still coexist without colliding.
+    await collection.createIndex(
+      { channelId: 1, userId: 1 },
+      { unique: true, partialFilterExpression: { status: { $in: OCCUPYING_STATUSES } } }
+    );
     indexesEnsured = true;
   }
   return collection;
@@ -37,12 +45,21 @@ async function ensureCollection() {
 
 async function create(doc) {
   const col = await ensureCollection();
-  await col.insertOne(doc);
+  try {
+    await col.insertOne(doc);
+  } catch (err) {
+    if (err.code === 11000) {
+      const dupErr = new Error(`LongBans: ${doc.userLogin || doc.userId} already has an occupying entry in channel ${doc.channelId}`);
+      dupErr.code = 'DUPLICATE_OCCUPYING';
+      throw dupErr;
+    }
+    throw err;
+  }
 }
 
-// Only one occupying long-ban per user per channel - enforced here at the application level
-// (checked before create()) rather than a unique index, since multiple completed/cancelled/failed
-// docs for the same user must be allowed to coexist.
+// Only one occupying long-ban per user per channel - enforced by the partial unique index above;
+// findActive() is still checked first so the common case gets a friendly chat message instead of
+// relying on the race case hitting the DB error path.
 async function findActive(channelId, userId) {
   const col = await ensureCollection();
   return col.findOne({ channelId, userId, status: { $in: OCCUPYING_STATUSES } });
