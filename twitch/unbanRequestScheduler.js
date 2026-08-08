@@ -18,7 +18,7 @@ const unbanRequestsRepo = require('../db/unbanRequestsRepo.js');
 const sniperShotsRepo = require('../db/sniperShotsRepo.js');
 const unbanVote = require('../games/unbanVote.js');
 const userLookup = require('./userLookup.js');
-const chattersAPI = require('./chattersAPI.js');
+const chatStats = require('../db/chatStats.js');
 const moderators = require('./moderators.js');
 const TwitchBanAPI = require('./TwitchBanAPI.js');
 const knownBots = require('../config/knownBots.js');
@@ -37,6 +37,10 @@ const SNIPER_POLL_MS = 2000;
 // any more, and a moderator who wants that has !longban.
 const MIN_SNIPER_SEC = 1;
 const MAX_SNIPER_SEC = 3600;
+// The sniper's target pool is whoever actually sent a chat message in this window, not Twitch's
+// Get Chatters list - that list includes silent lurkers with the chat window merely open, which
+// is how the sniper could previously pick someone who hadn't typed in days.
+const SNIPER_ACTIVITY_WINDOW_MS = 2 * 60 * 1000;
 // How long a mirrored viewer card stays fresh. Longer than the poll interval on purpose: the
 // counts barely move, and the one thing that does - a moderator adding a comment - reaching the
 // page within five minutes is fine for a queue that is reviewed by hand.
@@ -217,28 +221,25 @@ async function processVoteRequest(doc) {
 // 5. The sniper
 // ---------------------------------------------------------------------------
 
-// Picks one chatter at random to take the shot. Excluded, in order: the bot itself, the
-// broadcaster, everyone in the channel's moderator cache, and every account in
-// config/knownBots.js. Returns null when nobody is left - a small or half-empty chat is a normal
-// state, not an error, and the caller just skips the shot.
+// Narrows recent chatters down to who the sniper is allowed to hit at all. Excluded, in order:
+// the bot itself, the broadcaster, everyone in the channel's moderator cache, and every account in
+// config/knownBots.js. Doesn't touch ban status - that check needs a Helix round trip, done
+// separately in fireSniper() so this stays a plain sync filter.
 //
 // The exclusions aren't politeness: sniping a moderator or the broadcaster would have the bot
 // remove the people who can undo it (and, for a `ban`, remove the moderator who was mid-review),
 // and every other stats/activity path in this codebase already treats known bots as non-people.
-function pickSniperTarget(chatters, broadcasterId) {
+function pickEligibleChatters(chatters, broadcasterId) {
   const modIds = moderators.getModerators(broadcasterId);
   const botId = String(botInitInfo.settings['bot_id']);
 
-  const eligible = chatters.filter(chatter => {
+  return chatters.filter(chatter => {
     const id = String(chatter.user_id);
     if (id === botId || id === String(broadcasterId)) return false;
     if (modIds.has(id)) return false;
     if (knownBots.isKnownBot(id)) return false;
     return true;
   });
-
-  if (!eligible.length) return null;
-  return eligible[Math.floor(Math.random() * eligible.length)];
 }
 
 // Fires one shot that a moderator requested from the review desk's rifle scope. The web app only
@@ -258,12 +259,28 @@ async function fireSniper(channelLogin, settings) {
   const broadcasterId = String(botInitInfo.channels[channelLogin]?.id || '');
   if (!broadcasterId) return null;
 
-  const chatters = await chattersAPI.getChatters(broadcasterId);
-  const target = pickSniperTarget(chatters, broadcasterId);
-  if (!target) {
+  const since = new Date(Date.now() - SNIPER_ACTIVITY_WINDOW_MS);
+  const recentChatters = await chatStats.getRecentChatters(channel, since);
+  const eligible = pickEligibleChatters(recentChatters, broadcasterId);
+  if (!eligible.length) {
     console.log(`[UnbanRequests] Sniper found no eligible target in ${channel}`);
     return null;
   }
+
+  // Twitch's own ban list, not our own records - this also catches a ban/timeout a human
+  // moderator issued through Twitch's native UI, which this bot would otherwise have no idea
+  // about, so an already-gone user never gets "shot" a second time.
+  const alreadyBanned = await TwitchBanAPI.getBannedUserIds(
+    eligible.map(chatter => chatter.user_id),
+    broadcasterId
+  );
+  const candidates = eligible.filter(chatter => !alreadyBanned.has(String(chatter.user_id)));
+  if (!candidates.length) {
+    console.log(`[UnbanRequests] Sniper found no eligible target in ${channel}`);
+    return null;
+  }
+
+  const target = candidates[Math.floor(Math.random() * candidates.length)];
 
   const mode = settings.sniperMode === 'ban' ? 'ban' : 'timeout';
   const durationSec =
@@ -434,7 +451,7 @@ module.exports = {
   tick,
   // Exported for test/unbanSniper_test.js - it's the one piece of sniper logic that's pure enough
   // to check without a live Twitch connection.
-  pickSniperTarget,
+  pickEligibleChatters,
   fastTick,
   // Exported so scripts/local/probeModComments.js can drive the real mirroring path against one
   // channel instead of a hand-copied version of it.
