@@ -245,11 +245,15 @@ function pickSniperTarget(chatters, broadcasterId) {
 // ever writes the REQUEST (db/sniperShotsRepo.js) - picking who actually gets hit happens here,
 // server-side, so the page can never nominate a victim.
 //
-// Returns the outcome record, or null if the shot was skipped (feature off, or nobody eligible in
-// chat). Never throws: a failed shot is a missed shot, not an error worth stopping the poll for.
+// There is no per-channel toggle in front of this, and deliberately so: the bot never shoots on its
+// own, so the only way to get here is a moderator pulling the trigger at the desk - which is already
+// the decision a toggle would have been asking about. (One existed until 2026-08-08, left from an
+// earlier version that fired automatically every time a chat vote closed. That automatic path is
+// gone; the toggle survived only as a switch that made the rifle silently do nothing.)
+//
+// Returns the outcome record, or null if the shot was skipped (nobody eligible in chat). Never
+// throws: a failed shot is a missed shot, not an error worth stopping the poll for.
 async function fireSniper(channelLogin, settings) {
-  if (!settings.sniperEnabled) return null;
-
   const channel = `#${channelLogin}`;
   const broadcasterId = String(botInitInfo.channels[channelLogin]?.id || '');
   if (!broadcasterId) return null;

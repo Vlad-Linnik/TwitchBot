@@ -4,8 +4,8 @@
 // Undocumented GraphQL - see twitch/gqlClient.js's header for the token, the risks, how the field
 // names were derived, and why nothing here throws.
 //
-// One round trip fills the whole card. Verified 2026-08-07 against #vlad_261: the three counts
-// come back as 1 warn / 49 timeouts / 17 bans for the same user Twitch's own card shows as
+// One round trip fills the whole card. Verified 2026-08-07 against #vlad_261: the three punishment
+// counts come back as 1 warn / 49 timeouts / 17 bans for the same user Twitch's own card shows as
 // "1/49/17", which is what pins the meaning of that triple.
 const gqlClient = require('./gqlClient.js');
 
@@ -33,13 +33,43 @@ const MAX_ACTION_ROWS = 50;
 // on a Mongo document, so the ceiling is also what keeps that document a sane size.
 const MAX_MESSAGES = 500;
 
+// Every action type Twitch's mod log tracks against one user in one channel. This is the COMPLETE
+// set: the enum was brute-forced 2026-08-08 (scripts/local/probeEnum.js) and everything else is
+// rejected as an invalid value - there is no DELETE, MOD, VIP or RAID here.
+//
+// Reading only the first three (all this asked for until 2026-08-08) doesn't just omit rows, it
+// misrepresents the applicant: the live test case shows 3 bans of which all 3 were LIFTED, so a
+// serial offender and someone the moderators kept forgiving rendered identically.
+//
+// `selfActed` marks the two entries the user performs on themselves rather than a moderator. Their
+// label carries a single user fragment - the applicant - and the parser below would otherwise
+// report them as the moderator who acted, crediting the applicant with filing their own verdict.
+const ACTION_TYPES = [
+  { type: 'BAN', key: 'bans' },
+  { type: 'TIMEOUT', key: 'timeouts' },
+  { type: 'WARN', key: 'warns' },
+  { type: 'UNBAN', key: 'unbans' },
+  { type: 'UNTIMEOUT', key: 'untimeouts' },
+  { type: 'ACKNOWLEDGE_WARNING', key: 'warnAcks', selfActed: true },
+  // The applicant's own appeal history in this channel. `unbanRequests` counts EVERY request ever
+  // filed including the one being reviewed right now, so it is not a "has done this before" figure;
+  // the two resolved counts are, and they're the only ones the page reasons about.
+  { type: 'UNBAN_REQUEST_CREATED', key: 'unbanRequests', selfActed: true },
+  { type: 'UNBAN_REQUEST_APPROVED', key: 'unbanRequestsApproved' },
+  { type: 'UNBAN_REQUEST_DENIED', key: 'unbanRequestsDenied' },
+];
+
 // One action-type block: the rows AND the exact count, which need different page sizes.
-function actionBlock(alias, type) {
+//
+// `type` is requested on the node but deliberately NOT used as the discriminator - an
+// UNBAN_REQUEST_CREATED row comes back as `type: "UNKNOWN"` (verified against a real request), so
+// each row is tagged with the type of the block it was asked under instead.
+function actionBlock({ key, type }) {
   return `
-      ${alias}Count: targetedActions(first: $countPage, type: ${type}) {
+      ${key}Count: targetedActions(first: $countPage, type: ${type}) {
         ... on ModLogsTargetedActionsConnection { count pageInfo { hasNextPage } }
       }
-      ${alias}Rows: targetedActions(first: ${MAX_ACTION_ROWS}, type: ${type}) {
+      ${key}Rows: targetedActions(first: ${MAX_ACTION_ROWS}, type: ${type}) {
         ... on ModLogsTargetedActionsConnection {
           edges { node { id timestamp type localizedLabel {
             localizedStringFragments { token {
@@ -75,6 +105,11 @@ function actionBlock(alias, type) {
 // from "the last one on record" and the one a review page actually needs: our own lastBan comes
 // out of ModeratorActionLogs and for #vlad_261's test case named the wrong moderator and date
 // entirely (the bot's last recorded timeout, not the human ban being appealed).
+// `bansSharingSettings` is about the CHANNEL, not the applicant, and it is what makes an empty
+// `sharedBanChannels`/`sharedComments` readable: on a channel that never joined Twitch's ban-sharing
+// program those lists are empty for everyone, and "no shared bans" then means "we cannot know", not
+// "clean elsewhere". Exactly the trap `toSubscription` already dodges with `subscriptionProducts`.
+// Note it is a UNION type, so its body must be an inline fragment.
 const DOSSIER_QUERY = `
   query BureauViewerCard($channelID: ID!, $targetID: ID!, $countPage: Int!) {
     chatModeratorStrikeStatus(channelID: $channelID, userID: $targetID) {
@@ -83,9 +118,21 @@ const DOSSIER_QUERY = `
       warningDetails { createdAt reason warnedBy { id login displayName } }
     }
     lowTrustUserProperties(channelID: $channelID, userID: $targetID) {
-      treatment { type }
-      banEvasion { likelihood }
+      types
+      treatment { type updatedAt updatedBy { id login displayName } }
+      banEvasion { likelihood evaluatedAt }
+      potentialHarasser { likelihood evaluatedAt }
       sharedBanChannels { id name }
+      channelSharedBansUpdatedAt
+    }
+    channel(id: $channelID) {
+      moderationSettings {
+        bansSharingSettings {
+          ... on BansSharingSettings {
+            isEnabled isModCommentsSharingDisabled shareWithTypes treatment
+          }
+        }
+      }
     }
     targetUser: user(id: $targetID) {
       relationship(targetUserID: $channelID) {
@@ -106,9 +153,7 @@ const DOSSIER_QUERY = `
           edges { node { id timestamp text author { id login displayName chatColor } channel { id login } } }
         }
       }
-      ${actionBlock('bans', 'BAN')}
-      ${actionBlock('timeouts', 'TIMEOUT')}
-      ${actionBlock('warns', 'WARN')}
+      ${ACTION_TYPES.map(actionBlock).join('')}
       messages(first: ${MAX_MESSAGES}) {
         ... on ViewerCardModLogsMessagesConnection {
           edges { node { ... on ViewerCardModLogsChatMessage { id sentAt content { text } } } }
@@ -118,6 +163,19 @@ const DOSSIER_QUERY = `
   }
 `;
 
+// An RFC-3339 string -> Date, or null.
+//
+// Twitch does not consistently answer "never" with null: `channelSharedBansUpdatedAt` comes back as
+// "0001-01-01T00:00:00Z" (Go's zero time) for a channel that has never had a shared-ban read. Stored
+// as-is that becomes a real Date the page would happily render as a year-1 timestamp, so anything
+// before the epoch is treated as absent.
+function toDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return null;
+  return date;
+}
+
 // Flattens one comment edge into the shape stored on the UnbanRequests document.
 // `timestamp` arrives as RFC-3339 with nanosecond precision ("2026-08-02T16:50:14.914972761Z"),
 // which `new Date()` parses fine (it truncates), so no hand-parsing is needed.
@@ -126,7 +184,7 @@ function toComment(edge, shared) {
   if (!node) return null;
   return {
     id: String(node.id),
-    timestamp: node.timestamp ? new Date(node.timestamp) : null,
+    timestamp: toDate(node.timestamp),
     text: node.text || '',
     authorId: node.author?.id ? String(node.author.id) : null,
     authorLogin: node.author?.login || null,
@@ -148,7 +206,7 @@ function toCount(connection) {
   return Number(connection?.count) || 0;
 }
 
-// One punishment row.
+// One action row.
 //
 // `localizedLabel` is the only place the DURATION and the REASON exist - ModLogsTargetedAction has
 // no structured field for either (probed; they aren't there). Twitch renders it as a fragment list
@@ -160,24 +218,38 @@ function toCount(connection) {
 // that carries duration + reason. The page then writes the verb itself from `type` in the viewer's
 // own language and appends only the tail - which keeps the row readable instead of pasting a
 // sentence that names the applicant a second time.
-function toAction(edge) {
+//
+// A `selfActed` row breaks that geometry: with only one user fragment the verb sits AFTER it
+// ("7_emo_4_ka отправляет запрос на снятие блокировки: не буду больше"), so the tail would start
+// with a verb the page is about to write itself. Everything up to the first colon is dropped for
+// those two, which leaves the one thing worth keeping - the text of that past appeal - and leaves
+// nothing at all for a warning acknowledgement. If Twitch rewords either label the field simply
+// goes empty rather than pasting a duplicate sentence onto the row.
+function toAction(edge, { type, selfActed }) {
   const node = edge?.node;
   if (!node) return null;
 
   const fragments = node.localizedLabel?.localizedStringFragments || [];
   const users = fragments.filter(fragment => fragment?.token?.login);
-  const moderator = users[0]?.token || null;
+  const moderator = selfActed ? null : users[0]?.token || null;
   const lastUserIndex = fragments.map(f => Boolean(f?.token?.login)).lastIndexOf(true);
-  const detail = fragments
+  const tail = fragments
     .slice(lastUserIndex + 1)
     .map(fragment => fragment?.token?.text || '')
     .join('')
+    // A ban's label puts the target LAST ("vlad_261 банит X. Причина: спам"), so its tail opens on
+    // the sentence-ending punctuation - trimmed here rather than rendered as ". Причина: спам".
+    .replace(/^[\s.,;:]+/, '')
     .trim();
+  const colon = tail.indexOf(':');
+  const detail = selfActed ? (colon === -1 ? '' : tail.slice(colon + 1).trim()) : tail;
 
   return {
     id: String(node.id),
-    timestamp: node.timestamp ? new Date(node.timestamp) : null,
-    type: node.type || null, // BAN | TIMEOUT | WARN
+    // The block this row was requested under, NOT `node.type` - see actionBlock().
+    type,
+    timestamp: toDate(node.timestamp),
+    // Absent by design on a self-acted row: nobody moderated it.
     modId: moderator?.id ? String(moderator.id) : null,
     modLogin: moderator?.login || null,
     modDisplayName: moderator?.displayName || moderator?.login || null,
@@ -198,11 +270,11 @@ function toActiveStrike(status) {
   const { kind, details, actor } = kinds;
   return {
     kind,
-    at: details.createdAt ? new Date(details.createdAt) : null,
+    at: toDate(details.createdAt),
     // Twitch keeps a reason here separately from the mod-log label, and it is very often null -
     // a ban issued from chat carries no reason at all.
     reason: details.reason || null,
-    expiresAt: details.expiresAt ? new Date(details.expiresAt) : null,
+    expiresAt: toDate(details.expiresAt),
     modId: actor?.id ? String(actor.id) : null,
     modLogin: actor?.login || null,
     modDisplayName: actor?.displayName || actor?.login || null,
@@ -212,13 +284,45 @@ function toActiveStrike(status) {
 // Twitch's own risk read on this user in this channel. Kept because it answers the question an
 // amnesty decision actually turns on - is this the same person coming back around a ban - which
 // nothing in our own data can even approximate.
+//
+// Two likelihoods, not one: ban evasion and harassment are separate evaluations of the same user
+// and Twitch answers both in this one field, so dropping `potentialHarasser` (as this did until
+// 2026-08-08) threw away half the read for nothing.
 function toRisk(properties) {
   if (!properties) return null;
+  const treatedBy = properties.treatment?.updatedBy;
   return {
     banEvasion: properties.banEvasion?.likelihood || null, // UNLIKELY | POSSIBLE | LIKELY
+    banEvasionAt: toDate(properties.banEvasion?.evaluatedAt),
+    harassment: properties.potentialHarasser?.likelihood || null, // same three values
+    harassmentAt: toDate(properties.potentialHarasser?.evaluatedAt),
     treatment: properties.treatment?.type || null, // NONE | ACTIVE_MONITORING | RESTRICTED
+    // Who put them under that treatment and when. Note `updatedAt` is stamped even on a NONE
+    // treatment (verified), so it only means anything once `treatment` says something.
+    treatmentAt: toDate(properties.treatment?.updatedAt),
+    treatmentByLogin: treatedBy?.login || null,
+    treatmentByDisplayName: treatedBy?.displayName || treatedBy?.login || null,
+    // Twitch's own low-trust classification labels. Empty for a clean user; kept raw because the
+    // value set is undocumented and unguessable (the enum can't be introspected).
+    types: (properties.types || []).filter(Boolean),
     // Other channels that share their bans with this one and have this user banned.
     sharedBanChannels: (properties.sharedBanChannels || []).map(channel => channel.name).filter(Boolean),
+    sharedBansUpdatedAt: toDate(properties.channelSharedBansUpdatedAt),
+  };
+}
+
+// The CHANNEL's ban-sharing participation - see DOSSIER_QUERY's note. Not about the applicant at
+// all, which is why it sits beside `risk` rather than inside it: it says whether `risk`'s
+// `sharedBanChannels` and the shared half of `comments` could have held anything in the first place.
+function toBanSharing(settings) {
+  if (!settings) return null;
+  return {
+    enabled: Boolean(settings.isEnabled),
+    // Twitch stores the negative; stored as the positive so a reader doesn't have to invert it.
+    commentsShared: settings.isModCommentsSharingDisabled === false,
+    // Which channels this one shares WITH: ALL | PARTNERS | AFFILIATES | MUTUAL_FOLLOWERS.
+    shareWith: (settings.shareWithTypes || []).filter(Boolean),
+    treatment: settings.treatment || null, // what a shared ban does here, e.g. ACTIVE_MONITORING
   };
 }
 
@@ -267,13 +371,11 @@ async function getViewerCard(channelId, targetUserId) {
   comments.sort((a, b) => (b.timestamp?.getTime() || 0) - (a.timestamp?.getTime() || 0));
 
   // One list, newest first, so the page's punishments tab reads as a single history rather than
-  // three per-type columns. The type is kept on every row for the icon and the verb.
-  const actions = [
-    ...(card.bansRows?.edges || []),
-    ...(card.timeoutsRows?.edges || []),
-    ...(card.warnsRows?.edges || []),
-  ]
-    .map(toAction)
+  // nine per-type columns. The type is kept on every row for the icon and the verb - and is the
+  // only thing that survives the merge, since each row is tagged from its own block.
+  const actions = ACTION_TYPES.flatMap(entry =>
+    (card[`${entry.key}Rows`]?.edges || []).map(edge => toAction(edge, entry))
+  )
     .filter(Boolean)
     .sort((a, b) => (b.timestamp?.getTime() || 0) - (a.timestamp?.getTime() || 0));
 
@@ -285,30 +387,28 @@ async function getViewerCard(channelId, targetUserId) {
     .filter(node => node && node.content && typeof node.content.text === 'string')
     .map(node => ({
       id: String(node.id),
-      timestamp: node.sentAt ? new Date(node.sentAt) : null,
+      timestamp: toDate(node.sentAt),
       text: node.content.text,
     }))
     .sort((a, b) => (a.timestamp?.getTime() || 0) - (b.timestamp?.getTime() || 0));
+
+  // One key per ACTION_TYPES entry, plus `truncated`: true only if some history actually overflowed
+  // COUNT_PAGE_SIZE, in which case the page shows "1000+" rather than a number it can't stand behind.
+  const counts = { truncated: false };
+  for (const entry of ACTION_TYPES) {
+    counts[entry.key] = toCount(card[`${entry.key}Count`]);
+    if (card[`${entry.key}Count`]?.pageInfo?.hasNextPage) counts.truncated = true;
+  }
 
   return {
     comments: comments.slice(0, MAX_COMMENTS),
     subscription: toSubscription(data),
     activeStrike: toActiveStrike(data.chatModeratorStrikeStatus),
     risk: toRisk(data.lowTrustUserProperties),
+    banSharing: toBanSharing(data.channel?.moderationSettings?.bansSharingSettings),
     actions,
     messages,
-    counts: {
-      bans: toCount(card.bansCount),
-      timeouts: toCount(card.timeoutsCount),
-      warns: toCount(card.warnsCount),
-      // True only if a history actually overflowed COUNT_PAGE_SIZE - the page then shows "1000+"
-      // instead of a number it cannot stand behind.
-      truncated: Boolean(
-        card.bansCount?.pageInfo?.hasNextPage ||
-        card.timeoutsCount?.pageInfo?.hasNextPage ||
-        card.warnsCount?.pageInfo?.hasNextPage
-      ),
-    },
+    counts,
   };
 }
 

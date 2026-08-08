@@ -46,11 +46,12 @@ const DEFAULT_CHANNEL_SETTINGS = {
   // `enabled: false` by default: mirroring a channel's unban requests means polling Helix for it
   // every minute, which no channel should pay for until its owner actually turns the page on.
   //
-  // The sniper is the game half: when a vote closes, the bot times out (or bans) one random
-  // chatter. It is nested here rather than being a sibling top-level key because it only ever
-  // fires on a vote closing, so it is meaningless with `enabled: false`. Off by default on its own
-  // account too - a channel turning the review page on must not silently start punishing chatters.
-  // TwitchBot-Web/config/defaultChannelConfig.json is a hand-kept copy of this block.
+  // The `sniper*` fields describe the "stray bullet" - a random chatter punished by a shot a
+  // MODERATOR fires by hand at the review desk. The bot never fires one on its own, so there is no
+  // `sniperEnabled`: it was removed 2026-08-08 along with the last of an earlier design where the
+  // shot went off automatically whenever a chat vote closed. These three only say what the shot does
+  // to whoever it hits. Nested under `unbanBureau` because the rifle lives on that page and nowhere
+  // else. TwitchBot-Web/config/defaultChannelConfig.json is a hand-kept copy of this block.
   unbanBureau: {
     enabled: false,
     // Twitch GLOBAL emotes (verified `source: twitch-global` in the whiteList), so every viewer can
@@ -58,7 +59,6 @@ const DEFAULT_CHANNEL_SETTINGS = {
     voteApproveEmote: "VoteYea",
     voteDenyEmote: "VoteNay",
     voteDurationSec: 60,
-    sniperEnabled: false,
     sniperMode: "timeout", // 'timeout' | 'ban'
     sniperTimeoutSec: 60, // ignored when sniperMode === 'ban'
     sniperReason: "Шальная пуля Бюро амнистии",
