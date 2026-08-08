@@ -21,6 +21,8 @@ async function bootstrap() {
   const emoteSyncScheduler = require('./twitch/emoteSyncScheduler.js');
   const channelJoinScheduler = require('./twitch/channelJoinScheduler.js');
   const longBanScheduler = require('./twitch/longBanScheduler.js');
+  const unbanRequestScheduler = require('./twitch/unbanRequestScheduler.js');
+  const unbanVote = require('./games/unbanVote.js');
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
   const describeError = require('./shared/describeError.js');
@@ -181,6 +183,12 @@ async function bootstrap() {
         return;
       }
 
+      // Advisory chat vote on an unban appeal, if one is running in this channel. Called here
+      // rather than from execCommands because votes are bare emotes, and that router only ever
+      // sees '!'/'#'-prefixed messages. Deliberately does NOT short-circuit: a vote is still an
+      // ordinary chat message that should go on to the rest of the pipeline.
+      unbanVote.recordVote(channel, userState, message);
+
       // ! commands - also lets "@user !command" through (see shared/mentionRedirect.js), which
       // otherwise starts with @ and would never reach execCommands despite its handlers
       // supporting the redirect.
@@ -242,6 +250,9 @@ async function bootstrap() {
     channelJoinScheduler.start(client);
     // Renews/unbans !longban entries past Twitch's native 2-week timeout cap - see longBanScheduler.js.
     longBanScheduler.start(client);
+    // Mirrors Twitch's unban-request queue for the web panel's review page, applies the decisions
+    // made there, and runs the advisory chat votes - see unbanRequestScheduler.js.
+    unbanRequestScheduler.start(client);
   }
 
   await start();
