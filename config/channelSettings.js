@@ -41,6 +41,28 @@ const DEFAULT_CHANNEL_SETTINGS = {
     customCommandTimer: { minMessagesBetween: 10 },
     counterUpdate: { cooldownMs: 10000 },
   },
+  // "Бюро амнистии" - TwitchBot-Web's /unban-bureau review page and the advisory chat vote a
+  // moderator can start from it (twitch/unbanRequestScheduler.js, games/unbanVote.js).
+  // `enabled: false` by default: mirroring a channel's unban requests means polling Helix for it
+  // every minute, which no channel should pay for until its owner actually turns the page on.
+  //
+  // The sniper is the game half: when a vote closes, the bot times out (or bans) one random
+  // chatter. It is nested here rather than being a sibling top-level key because it only ever
+  // fires on a vote closing, so it is meaningless with `enabled: false`. Off by default on its own
+  // account too - a channel turning the review page on must not silently start punishing chatters.
+  // TwitchBot-Web/config/defaultChannelConfig.json is a hand-kept copy of this block.
+  unbanBureau: {
+    enabled: false,
+    // Twitch GLOBAL emotes (verified `source: twitch-global` in the whiteList), so every viewer can
+    // type them without a sub or 7TV - which is the whole reason a vote emote has to be global.
+    voteApproveEmote: "VoteYea",
+    voteDenyEmote: "VoteNay",
+    voteDurationSec: 60,
+    sniperEnabled: false,
+    sniperMode: "timeout", // 'timeout' | 'ban'
+    sniperTimeoutSec: 60, // ignored when sniperMode === 'ban'
+    sniperReason: "Шальная пуля Бюро амнистии",
+  },
   responses: {
     busy: ["I am busy"],
     yesNo: ["Да", "Нет", "Не могу сказать", "eeeh ", "Возможно", "50/50", "Скорее да, чем нет"],

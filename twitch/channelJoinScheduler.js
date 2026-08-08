@@ -26,6 +26,7 @@ const isInsult = require('../games/isInsult.js');
 const muteDuel = require('../games/muteDuel.js');
 const questionToThisBot = require('../games/questionToThisBot.js');
 const randomEvents = require('../games/randomEvents.js');
+const unbanVote = require('../games/unbanVote.js');
 
 const POLL_INTERVAL_MS = 60 * 1000;
 
@@ -41,6 +42,7 @@ async function joinChannel(client, login, channelId) {
   muteDuel.addChannel(channel);
   questionToThisBot.addChannel(channel);
   randomEvents.addChannel(channel);
+  unbanVote.addChannel(channel);
 
   // Same order/rationale as index.js's start(): moderator cache before EventSub/ActivityTracker
   // so neither reads an empty cache while it loads; emote sync fire-and-forget so a slow/failed

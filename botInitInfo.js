@@ -31,6 +31,11 @@ const settings = {
   "refresh_token": process.env.refresh_token,
   "Client_Id": process.env.Client_Id,
   "password": process.env.password,
+  // The `auth-token` cookie of a logged-in twitch.tv session, NOT a Helix token - the only
+  // credential Twitch's private GraphQL accepts. Optional: without it the Бюро амнистии dossier
+  // simply renders without Twitch's own moderator comments and action counts. See
+  // twitch/gqlClient.js for why it exists and what it costs.
+  "gql_auth_token": process.env.gql_auth_token,
   "appAccessToken": null,
   "startTime": startTime,
   "debug": process.env.DEBUG_MODE === 'true'
