@@ -26,6 +26,7 @@ async function bootstrap() {
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
   const describeError = require('./shared/describeError.js');
+  const gqlClient = require('./twitch/gqlClient.js');
 
   // bot settings
   const opts = {
@@ -137,6 +138,7 @@ async function bootstrap() {
       memoryUsageMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
       cpuPercent: Math.round(cpuPercent * 10) / 10,
       recentErrors: errorRingBuffer.getRecent(),
+      gql: gqlClient.getStatus(),
     }).catch((err) => console.error('[Heartbeat] write failed:', err.message));
 
     // Self-restart rather than trying to nurse tmi.js's internal state back to health - a

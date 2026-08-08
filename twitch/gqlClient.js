@@ -57,6 +57,7 @@ const DISABLE_AFTER_AUTH_FAIL_MS = 30 * 60 * 1000;
 const LABEL_LANGUAGE = 'ru';
 
 let disabledUntil = 0;
+let lastFailureAt = null;
 
 function token() {
   return botInitInfo.settings['gql_auth_token'] || '';
@@ -66,6 +67,20 @@ function token() {
 // a failure per request on an install that simply never configured a token.
 function isEnabled() {
   return Boolean(token()) && Date.now() >= disabledUntil;
+}
+
+// Snapshot for the admin panel's bot-status tile (index.js folds this into the BotHeartbeat
+// write). `disabled` reflects the 30-minute cooldown from the last 401/403, which is the closest
+// thing to "this needs re-capturing right now" this module can say without spending a real call -
+// it can lag up to DISABLE_AFTER_AUTH_FAIL_MS behind an actual fix, same as the console.error it
+// mirrors.
+function getStatus() {
+  return {
+    configured: Boolean(token()),
+    disabled: Date.now() < disabledUntil,
+    disabledUntil: disabledUntil ? new Date(disabledUntil) : null,
+    lastFailureAt,
+  };
 }
 
 // Runs one GraphQL document and returns its `data`, or null if anything at all went wrong.
@@ -91,6 +106,7 @@ async function query(document, variables) {
     const status = error.response?.status;
     if (status === 401 || status === 403) {
       disabledUntil = Date.now() + DISABLE_AFTER_AUTH_FAIL_MS;
+      lastFailureAt = new Date();
       console.error(
         '[GQL] token rejected - viewer-card lookups disabled for 30 min. Re-capture the auth-token ' +
         'cookie of a logged-in moderator session into .env gql_auth_token:',
@@ -113,4 +129,4 @@ async function query(document, variables) {
   return response.data?.data || null;
 }
 
-module.exports = { isEnabled, query };
+module.exports = { isEnabled, query, getStatus };
