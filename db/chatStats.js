@@ -1024,6 +1024,21 @@ class ChatStats {
     }
   }
 
+  // Distinct senders of an actual chat message in `channel` (with leading `#`) since `sinceDate`.
+  // Used by the Бюро амнистии sniper (twitch/unbanRequestScheduler.js, 2-minute window) so its
+  // target pool is "who is actually talking right now", not Twitch's Get Chatters list - that list
+  // includes silent lurkers with the chat window merely open, which is how the sniper could
+  // previously land on someone who hadn't typed in days. Backed by the existing
+  // {channel:1, timestamp:-1, userId:1} index, so this is a covered range scan, not a collection scan.
+  async getRecentChatters(channel, sinceDate) {
+    await this.ensureInitialized();
+    const rows = await this.messagesCollection.aggregate([
+      { $match: { channel, timestamp: { $gte: sinceDate } } },
+      { $group: { _id: '$userId', userName: { $last: '$userName' } } },
+    ]).toArray();
+    return rows.map(row => ({ user_id: row._id, user_login: row.userName }));
+  }
+
 async getUserRank(userId, channel, period) {
     await this.ensureInitialized();
 
