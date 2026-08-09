@@ -141,6 +141,7 @@ const DOSSIER_QUERY = `
     }
     channelUser: user(id: $channelID) {
       subscriptionProducts { id }
+      chatSettings { rules }
     }
     viewerCardModLogs(channelID: $channelID, targetID: $targetID) {
       comments(first: ${MAX_COMMENTS}) {
@@ -314,6 +315,22 @@ function toRisk(properties) {
 // The CHANNEL's ban-sharing participation - see DOSSIER_QUERY's note. Not about the applicant at
 // all, which is why it sits beside `risk` rather than inside it: it says whether `risk`'s
 // `sharedBanChannels` and the shared half of `comments` could have held anything in the first place.
+// The channel's own posted chat rules (the list under the stream, `chatSettings.rules`). Channel
+// data rather than applicant data, like `bansSharingSettings` above, and free-form strings the
+// broadcaster typed - Twitch imposes no structure on them, so neither do we.
+//
+// They are here because an accusation needs a law to cite. Without them the review page's experts
+// could only argue from tone, and the absent ban reason - which on most channels simply means the
+// moderator did not bother typing one - kept being read as "наказали ни за что".
+//
+// Null (no rules posted) is deliberately distinct from [] so a reader can tell "channel posted
+// none" from "we failed to read them".
+function toChannelRules(chatSettings) {
+  if (!chatSettings) return null;
+  const rules = (chatSettings.rules || []).map((line) => String(line ?? "").trim()).filter(Boolean);
+  return rules.length ? rules : null;
+}
+
 function toBanSharing(settings) {
   if (!settings) return null;
   return {
@@ -406,6 +423,7 @@ async function getViewerCard(channelId, targetUserId) {
     activeStrike: toActiveStrike(data.chatModeratorStrikeStatus),
     risk: toRisk(data.lowTrustUserProperties),
     banSharing: toBanSharing(data.channel?.moderationSettings?.bansSharingSettings),
+    channelRules: toChannelRules(data.channelUser?.chatSettings),
     actions,
     messages,
     counts,
