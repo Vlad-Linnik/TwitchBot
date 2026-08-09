@@ -75,6 +75,10 @@ async function upsertFromTwitch(doc) {
           status: null,
           decision: null,
           text: null,
+          // When an 'approved' decision should actually reach Twitch - null means immediately.
+          // TwitchBot-Web's "решение вступает в силу" field on the visa (routes/unbanBureau.js's
+          // decide.json); see findResolutionPending() below for how it's honored.
+          effectiveAt: null,
           decidedById: null,
           decidedByLogin: null,
           decidedByDisplayName: null,
@@ -143,10 +147,24 @@ async function markMissingAsResolvedElsewhere(channelId, keepRequestIds) {
   return result.modifiedCount;
 }
 
-// Decisions a moderator made on the website, awaiting this bot's poller to actually PATCH Twitch.
-async function findResolutionPending() {
+// Decisions a moderator made on the website, awaiting this bot's poller to actually PATCH Twitch -
+// but only the DUE ones. `resolution.effectiveAt` is the "решение вступает в силу" date the
+// moderator can set when approving (null/past = immediately); a future date means the doc sits
+// here, still resolution.status: 'pending', until a tick's `now` reaches it. Same execute-only-by-
+// bot contract as everything else in this collection - the web side can only ever ask for a date,
+// never PATCH Twitch itself.
+async function findResolutionPending(now = new Date()) {
   const col = await ensureCollection();
-  return col.find({ 'resolution.status': 'pending' }).toArray();
+  return col
+    .find({
+      'resolution.status': 'pending',
+      $or: [
+        { 'resolution.effectiveAt': null },
+        { 'resolution.effectiveAt': { $exists: false } },
+        { 'resolution.effectiveAt': { $lte: now } },
+      ],
+    })
+    .toArray();
 }
 
 // Chat votes requested on the website, awaiting this bot to actually post the prompt in chat.
