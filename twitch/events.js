@@ -302,12 +302,10 @@ class EventSubClient {
                 moderators.removeModerator(broadcasterId, targetUserId);
             }
         }
-        else {
-            console.log("[Envent]");
-            console.log(event);
-            console.log(metadata.message_timestamp);
-        }
-
+        // Every other channel.moderate action (vip/unvip/raid/slow, approve_unban_request/
+        // deny_unban_request, shared_chat_*, ...) is intentionally ignored here - the Amnesty
+        // Bureau tracks unban-request state via unbanRequestScheduler.js's own polling, not this
+        // event, and nothing else in this bot needs the rest.
     }
 }
 
