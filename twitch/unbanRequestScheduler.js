@@ -417,7 +417,8 @@ async function tick() {
   );
 
   // Votes are NOT handled here any more - they run on fastTick()'s 2s cadence (see processVotes).
-  const decisions = await unbanRequestsRepo.findResolutionPending();
+  // Only decisions actually due - see findResolutionPending()'s own note on resolution.effectiveAt.
+  const decisions = await unbanRequestsRepo.findResolutionPending(new Date());
 
   for (const doc of decisions) {
     await processDecision(doc).catch(err =>
