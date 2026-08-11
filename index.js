@@ -22,6 +22,7 @@ async function bootstrap() {
   const channelJoinScheduler = require('./twitch/channelJoinScheduler.js');
   const longBanScheduler = require('./twitch/longBanScheduler.js');
   const unbanRequestScheduler = require('./twitch/unbanRequestScheduler.js');
+  const diskUsageScheduler = require('./twitch/diskUsageScheduler.js');
   const unbanVote = require('./games/unbanVote.js');
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
@@ -272,6 +273,10 @@ async function bootstrap() {
     // Mirrors Twitch's unban-request queue for the web panel's review page, applies the decisions
     // made there, and runs the advisory chat votes - see unbanRequestScheduler.js.
     unbanRequestScheduler.start(client);
+    // Hourly dbStats/$collStats snapshot for the admin panel's Disk Usage tab - see
+    // diskUsageScheduler.js. Doesn't need the client; started here just to keep every
+    // background scheduler's startup call in one place.
+    diskUsageScheduler.start();
   }
 
   await start();
