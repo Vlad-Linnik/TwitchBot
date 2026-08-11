@@ -25,11 +25,18 @@ const knownBots = require('../config/knownBots.js');
 const botInitInfo = require('../botInitInfo.js');
 const channelSettings = require('../config/channelSettings.js');
 const describeError = require('../shared/describeError.js');
+const healthTracker = require('../shared/healthTracker.js');
+
+// One health entry covering the queue mirror across every bureau channel (see tick()).
+const MIRROR_HEALTH_KEY = 'unban-mirror';
+const MIRROR_HEALTH_LABEL = '[UnbanRequests] Queue mirror';
 
 // Slower than longBanScheduler's 30s: unlike a long-ban renewal, nothing here is time-critical
 // against Twitch (an appeal that sits one extra minute costs nothing), and unlike that poller this
 // one spends a Helix call PER CHANNEL on every tick rather than only when something is due.
 const POLL_INTERVAL_MS = 60 * 1000;
+// Two missed mirror ticks plus slack before a failure counts as an outage rather than a blip.
+const MIRROR_HEALTH_GRACE_MS = POLL_INTERVAL_MS * 2 + 30 * 1000;
 // The fast poll - see fastTick() for what belongs on it and why it's 30x faster than the main one.
 const SNIPER_POLL_MS = 2000;
 // Hard bounds on the sniper's timeout: a stray ChannelConfig value must not turn a joke mechanic
@@ -407,8 +414,17 @@ async function resumeInterruptedVotes() {
 async function tick() {
   const channels = channelsWithBureauEnabled();
   for (const login of channels) {
-    await mirrorChannel(login).catch(err =>
-      console.error(`[UnbanRequests] Mirror failed for #${login}:`, describeError(err))
+    await mirrorChannel(login).then(
+      // Mirroring is a poll like the stream-status one, and fails the same way for the same
+      // reason: the network, all channels at once. Held for a couple of missed ticks before it
+      // counts as an outage, and closed out with a recovery line - see shared/healthTracker.js.
+      () => healthTracker.reportSuccess(MIRROR_HEALTH_KEY, { label: MIRROR_HEALTH_LABEL, scope: `#${login}` }),
+      err => healthTracker.reportFailure(MIRROR_HEALTH_KEY, {
+        label: MIRROR_HEALTH_LABEL,
+        detail: describeError(err),
+        scope: `#${login}`,
+        graceMs: MIRROR_HEALTH_GRACE_MS,
+      })
     );
   }
 

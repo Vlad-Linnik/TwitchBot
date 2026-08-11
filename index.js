@@ -25,6 +25,7 @@ async function bootstrap() {
   const unbanVote = require('./games/unbanVote.js');
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
+  const healthTracker = require('./shared/healthTracker.js');
   const describeError = require('./shared/describeError.js');
   const gqlClient = require('./twitch/gqlClient.js');
 
@@ -96,9 +97,24 @@ async function bootstrap() {
     hasConnected = true;
     markActivity();
     console.log('[tmi] Connected to Twitch IRC.');
+    healthTracker.reportSuccess('tmi', { label: '[tmi] Twitch IRC' });
   });
-  client.on('disconnected', (reason) => console.error('[tmi] Disconnected:', reason));
-  client.on('reconnect', () => console.error('[tmi] Reconnecting to Twitch IRC...'));
+  // A disconnect is not by itself a fault: Twitch sends its own RECONNECT command every half hour
+  // or so (tmi.js's `case 'RECONNECT'` disconnects and reconnects a second later, with no
+  // 'reconnect' event - which is why those lines used to appear alone), and tmi.js reconnects on
+  // its own after a dropped socket too. Only a disconnect that hasn't healed within the grace
+  // window is worth an error line; anything faster records itself as a self-healed blip when
+  // 'connected' fires. 30s is far longer than tmi.js's own ~1-2s reconnect and still well short of
+  // the watchdog's 5-minute kill, so a genuinely dead connection is still reported before that.
+  const TMI_RECONNECT_GRACE_MS = 30_000;
+  client.on('disconnected', (reason) => {
+    healthTracker.reportFailure('tmi', {
+      label: '[tmi] Twitch IRC',
+      detail: reason || 'Connection closed.',
+      graceMs: TMI_RECONNECT_GRACE_MS,
+    });
+  });
+  client.on('reconnect', () => console.log('[tmi] Reconnecting to Twitch IRC...'));
 
   const HEARTBEAT_INTERVAL_MS = 30_000;
   const WATCHDOG_STALE_MS = 5 * 60 * 1000;
@@ -138,6 +154,7 @@ async function bootstrap() {
       memoryUsageMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
       cpuPercent: Math.round(cpuPercent * 10) / 10,
       recentErrors: errorRingBuffer.getRecent(),
+      health: healthTracker.getSnapshot(),
       gql: gqlClient.getStatus(),
     }).catch((err) => console.error('[Heartbeat] write failed:', err.message));
 
