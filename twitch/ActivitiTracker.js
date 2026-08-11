@@ -5,6 +5,12 @@ const streamStatus = require('./streamStatus.js');
 const moderators = require('./moderators.js');
 const emoteSyncScheduler = require('./emoteSyncScheduler.js');
 const describeError = require('../shared/describeError.js');
+const healthTracker = require('../shared/healthTracker.js');
+
+// One health entry for the Get Streams poll across every channel, since a failure here is
+// practically always the network rather than a channel - see fetchStreamInfo().
+const HEALTH_KEY = 'stream-status';
+const HEALTH_LABEL = '[ModTracker] Stream status';
 
 // ensureOpenSession's staleAfterMs: below this gap since the last recorded viewer sample, a bot
 // restart (crash/redeploy) mid-stream resumes the same StreamSessions row instead of splitting
@@ -58,9 +64,23 @@ class ModActivityTracker {
                 }
             });
             const streams = response.data && response.data.data;
+            healthTracker.reportSuccess(HEALTH_KEY, { label: HEALTH_LABEL, scope: `#${this.channelLogin}` });
             return streams && streams.length > 0 ? streams[0] : false;
         } catch (error) {
-            console.error('[ModTracker] Error Stream status:', describeError(error));
+            // Tracked rather than logged outright: one poll failing is normal (this returns null
+            // and the caller already treats that as "unknown, try again next cycle"), and a
+            // network blip fails every channel's poll at once - which is why three identical
+            // "[ModTracker] Error Stream status" lines used to land in the panel per outage. The
+            // channel is passed as the scope so those collapse into one incident that only closes
+            // when every affected channel is polling again.
+            healthTracker.reportFailure(HEALTH_KEY, {
+                label: HEALTH_LABEL,
+                detail: describeError(error),
+                scope: `#${this.channelLogin}`,
+                // Two missed polls plus slack: below that, a single failed poll on a 5-minute
+                // cycle would be reported as an outage before the retry that fixes it even runs.
+                graceMs: this.intervalMs * 2 + 60000,
+            });
             return null;
         }
     }

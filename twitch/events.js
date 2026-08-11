@@ -15,6 +15,7 @@ const botInitInfo = require("../botInitInfo.js");
 const ChatStats = require('../db/chatStats.js');
 const moderators = require('./moderators.js');
 const describeError = require('../shared/describeError.js');
+const healthTracker = require('../shared/healthTracker.js');
 
 const DEFAULT_URL = 'wss://eventsub.wss.twitch.tv/ws';
 const MAX_RECONNECT_DELAY_MS = 30000;
@@ -25,6 +26,11 @@ const KEEPALIVE_GRACE_FACTOR = 3;
 // Re-attempt any channel whose subscribe failed transiently (network blip, Helix 5xx). Without
 // this a single failed call means that channel silently records nothing until the next restart.
 const RESUBSCRIBE_SWEEP_MS = 5 * 60 * 1000;
+// How long a dropped socket may stay dropped before it's called an outage rather than a blip.
+// scheduleReconnect() backs off up to MAX_RECONNECT_DELAY_MS, so this has to clear one full
+// backoff step plus the handshake - below that, a perfectly normal retry would report itself as
+// a fault. See shared/healthTracker.js.
+const EVENTSUB_RECOVERY_GRACE_MS = MAX_RECONNECT_DELAY_MS + 30000;
 
 const processedMessages = new Set();
 
@@ -109,6 +115,9 @@ class EventSubClient {
                 const keepaliveS = payload.session.keepalive_timeout_seconds || DEFAULT_KEEPALIVE_TIMEOUT_S;
                 this.keepaliveTimeoutMs = keepaliveS * 1000 * KEEPALIVE_GRACE_FACTOR;
                 this.armKeepalive();
+                // A session is live again - closes out whatever failure got us here, either as a
+                // self-healed blip or as the end of a reported outage.
+                healthTracker.reportSuccess('eventsub', { label: '[EventSub] WebSocket' });
 
                 if (socket.isHandoff) {
                     // Twitch migrates the old session's subscriptions onto this one, so
@@ -151,9 +160,25 @@ class EventSubClient {
             this.ws = null;
             this.sessionId = null;
             console.log(`[EventSub] Connection closed (code ${code}).`);
+            healthTracker.reportFailure('eventsub', {
+                label: '[EventSub] WebSocket',
+                detail: `connection closed (code ${code})`,
+                graceMs: EVENTSUB_RECOVERY_GRACE_MS,
+            });
             this.scheduleReconnect();
         });
-        socket.on('error', (err) => console.error('[EventSub] WebSocket error:', describeError(err)));
+        // Not reported as an error on its own: a socket error is followed by a 'close' here and a
+        // backoff reconnect, so it's the health tracker that decides whether this turned into an
+        // outage or healed itself (see shared/healthTracker.js).
+        socket.on('error', (err) => {
+            if (this.ws !== socket) return;
+            console.log('[EventSub] WebSocket error:', describeError(err));
+            healthTracker.reportFailure('eventsub', {
+                label: '[EventSub] WebSocket',
+                detail: describeError(err),
+                graceMs: EVENTSUB_RECOVERY_GRACE_MS,
+            });
+        });
     }
 
     // A silently dead socket now costs every channel its moderation events at once, not just one,
@@ -162,7 +187,12 @@ class EventSubClient {
     armKeepalive() {
         this.clearKeepalive();
         this.keepaliveTimer = setTimeout(() => {
-            console.warn(`[EventSub] No keepalive for ${this.keepaliveTimeoutMs / 1000}s, reconnecting.`);
+            console.log(`[EventSub] No keepalive for ${this.keepaliveTimeoutMs / 1000}s, reconnecting.`);
+            healthTracker.reportFailure('eventsub', {
+                label: '[EventSub] WebSocket',
+                detail: `no keepalive for ${this.keepaliveTimeoutMs / 1000}s`,
+                graceMs: EVENTSUB_RECOVERY_GRACE_MS,
+            });
             const dead = this.ws;
             this.ws = null;
             this.sessionId = null;
