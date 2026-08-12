@@ -12,6 +12,12 @@ const healthTracker = require('../shared/healthTracker.js');
 const HEALTH_KEY = 'stream-status';
 const HEALTH_LABEL = '[ModTracker] Stream status';
 
+// Get Chatters gets its own entry rather than sharing the one above: the two calls fail
+// independently (Twitch answered this one with a bare HTTP 500 on 2026-08-12 while Get Streams
+// was fine), and folding them together would let one recovering close the other's incident.
+const CHATTERS_HEALTH_KEY = 'chatters';
+const CHATTERS_HEALTH_LABEL = '[ModTracker] Chatters';
+
 // ensureOpenSession's staleAfterMs: below this gap since the last recorded viewer sample, a bot
 // restart (crash/redeploy) mid-stream resumes the same StreamSessions row instead of splitting
 // the web panel's "Статистика стрима" chart into a new stream date. Above it, the session is
@@ -108,9 +114,19 @@ class ModActivityTracker {
                 after = response.data.pagination?.cursor;
 
             } while (after);
+            healthTracker.reportSuccess(CHATTERS_HEALTH_KEY, { label: CHATTERS_HEALTH_LABEL, scope: `#${this.channelLogin}` });
             return chatters;
         } catch (error) {
-            console.error('[ModTracker] Error:', describeError(error));
+            // Same reasoning as fetchStreamInfo() above: this retries itself on the next tick, and
+            // the only cost of one failed call is that this cycle's moderator-presence sample is
+            // empty. It used to log a bare "[ModTracker] Error:" straight to the panel, which said
+            // neither which call failed nor whether it came back.
+            healthTracker.reportFailure(CHATTERS_HEALTH_KEY, {
+                label: CHATTERS_HEALTH_LABEL,
+                detail: describeError(error),
+                scope: `#${this.channelLogin}`,
+                graceMs: this.intervalMs * 2 + 60000,
+            });
             return [];
         }
     }

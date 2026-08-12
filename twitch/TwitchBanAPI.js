@@ -48,36 +48,15 @@ async function ban(userId, broadcasterId, reason = "No reason") {
   }
 }
 
-// Which of `userIds` are currently banned or timed out on `broadcasterId`, according to Twitch
-// itself - not our own records, so this also catches a ban/timeout issued by a human moderator
-// through Twitch's native UI, which this bot would never otherwise know about. Used by the Бюро
-// амнистии sniper (twitch/unbanRequestScheduler.js) so it can't "shoot" someone who's already gone.
-// Chunked at Helix's own limit of 100 user_id params per call; the sniper's candidate pool (chatters
-// active in the last minute) is realistically far smaller, so this is normally a single request.
-async function getBannedUserIds(userIds, broadcasterId) {
-  const ids = [...new Set(userIds.map(String))];
-  if (!ids.length) return new Set();
-
-  const CHUNK = 100;
-  const banned = new Set();
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    const chunk = ids.slice(i, i + CHUNK);
-    const params = new URLSearchParams({ broadcaster_id: String(broadcasterId) });
-    chunk.forEach(id => params.append('user_id', id));
-    const headers = {
-      Authorization: `Bearer ${botInitInfo.settings["password"]}`,
-      "Client-Id": botInitInfo.settings["Client_Id"],
-    };
-
-    try {
-      const response = await axios.get(`https://api.twitch.tv/helix/moderation/banned?${params.toString()}`, { headers });
-      for (const row of response.data.data || []) banned.add(String(row.user_id));
-    } catch (error) {
-      console.error("[TwitchBanAPI] getBannedUserIds lookup failed:", describeError(error));
-    }
-  }
-  return banned;
-}
+// NOTE: there is deliberately no "is this user banned?" reader here. Helix's Get Banned Users
+// (GET /helix/moderation/banned) is the only endpoint that answers it, and it requires
+// `broadcaster_id` to equal the user id in the access token - a moderator token asking about a
+// channel it merely moderates is answered 401 "incorrect user authorization" at any scope. One
+// lived here until 2026-08-12 and failed exactly that way on every prod call, returning an empty
+// set (i.e. "nobody is banned") each time. The Бюро амнистии sniper, its only caller, now asks
+// db/chatStats.js's getPunishedUserIds() instead - our own EventSub-fed ModeratorActionLogs, which
+// does see bans issued by human moderators through Twitch's native UI. Don't reintroduce this
+// without a broadcaster's own token, which this bot does not have.
 
 // /unban (also lifts an active timeout - same Twitch mechanism under the hood)
 // Unlike timeout()/ban() above, this returns true/false instead of swallowing silently: both
@@ -103,5 +82,4 @@ module.exports = {
   timeout: timeout,
   ban: ban,
   unban: unban,
-  getBannedUserIds,
 };
