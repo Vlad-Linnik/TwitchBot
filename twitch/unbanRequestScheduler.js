@@ -274,12 +274,15 @@ async function fireSniper(channelLogin, settings) {
     return null;
   }
 
-  // Twitch's own ban list, not our own records - this also catches a ban/timeout a human
-  // moderator issued through Twitch's native UI, which this bot would otherwise have no idea
-  // about, so an already-gone user never gets "shot" a second time.
-  const alreadyBanned = await TwitchBanAPI.getBannedUserIds(
+  // Don't "shoot" someone who is already gone. This reads our own ModeratorActionLogs rather than
+  // Helix: EventSub's channel.moderate reports bans/timeouts issued by human moderators through
+  // Twitch's native UI too, and Helix's Get Banned Users is unusable from a moderator token (see
+  // twitch/TwitchBanAPI.js's note - it answered 401 on every call). The same `since` as the
+  // candidate pool is the whole window that can matter: everyone here posted a message inside it.
+  const alreadyBanned = await chatStats.getPunishedUserIds(
+    channelLogin,
     eligible.map(chatter => chatter.user_id),
-    broadcasterId
+    since
   );
   const candidates = eligible.filter(chatter => !alreadyBanned.has(String(chatter.user_id)));
   if (!candidates.length) {

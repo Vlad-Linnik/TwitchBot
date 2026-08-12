@@ -1039,6 +1039,59 @@ class ChatStats {
     return rows.map(row => ({ user_id: row._id, user_login: row.userName }));
   }
 
+  // Which of `userIds` were banned or timed out in `channel` (WITHOUT a leading `#`, the
+  // ModeratorActionLogs convention) since `sinceDate`, and are still serving it now.
+  //
+  // This replaces a Helix "Get Banned Users" call the sniper used to make (2026-08-12). That
+  // endpoint can never work from this bot: `broadcaster_id` must equal the token's own user id,
+  // so a moderator token asking about the channel it moderates gets 401 "incorrect user
+  // authorization" - which is exactly what prod was logging, several times per shot, while the
+  // call silently degraded to "nobody is banned" and the guard did nothing at all.
+  //
+  // Our own log is a fair substitute HERE specifically because of how narrow the question is.
+  // EventSub's `channel.moderate` reports every ban/timeout in the channel no matter who issued
+  // it - including a human moderator using Twitch's native UI, which is the case the Helix call
+  // was reached for - and the sniper only asks about people who sent a chat message inside the
+  // last couple of minutes, so any punishment that matters was necessarily issued inside that
+  // same window and would have arrived over that subscription. (Two known gaps, both harmless:
+  // an EventSub outage across the window loses a punishment, and `unban`/`untimeout` aren't
+  // recorded at all, so a ban lifted seconds later still excludes that candidate. Both cost at
+  // most one skipped candidate out of the pool.)
+  //
+  // Backed by the existing {channel:1, timestamp:-1, userId:1} index.
+  async getPunishedUserIds(channel, userIds, sinceDate) {
+    await this.ensureInitialized();
+    const ids = [...new Set(userIds.map(String))];
+    if (!ids.length) return new Set();
+
+    const rows = await this.modLogs.find(
+      {
+        channel,
+        timestamp: { $gte: sinceDate },
+        userId: { $in: ids },
+        action: { $in: ['ban', 'timeout'] },
+      },
+      { projection: { userId: 1, action: 1, timestamp: 1, durationMs: 1 } }
+    ).toArray();
+
+    const now = Date.now();
+    const punished = new Set();
+    for (const row of rows) {
+      // A timeout shorter than the sniper's own activity window can already have expired by the
+      // time we look, and an expired timeout is not a reason to skip anyone. A ban has no
+      // duration, so it always counts.
+      // A timeout with no recorded duration (no expiry in the EventSub payload) counts as still
+      // serving: the uncertainty is cheap in this direction - it costs one candidate out of the
+      // pool - while guessing "expired" is how the shot lands on someone already muted.
+      if (row.action === 'timeout' && row.durationMs
+          && new Date(row.timestamp).getTime() + row.durationMs <= now) {
+        continue;
+      }
+      punished.add(String(row.userId));
+    }
+    return punished;
+  }
+
 async getUserRank(userId, channel, period) {
     await this.ensureInitialized();
 

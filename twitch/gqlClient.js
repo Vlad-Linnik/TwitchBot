@@ -56,6 +56,24 @@ const DISABLE_AFTER_AUTH_FAIL_MS = 30 * 60 * 1000;
 // and storing every label twice.
 const LABEL_LANGUAGE = 'ru';
 
+// Twitch's own server-side failures, as they appear in a GraphQL `errors[]` entry. These say
+// nothing about our query - the next poll normally resolves the same field fine - so they are
+// reported as a warning rather than as a fault needing a human. Deliberately a small allow-list
+// matched on the message text (the entries carry no error code): anything unrecognised is still
+// treated as a real schema break, because failing to notice one of THOSE is the expensive mistake.
+const TRANSIENT_ERROR_PATTERNS = [
+  /service timeout/i,
+  /service error/i,
+  /failed to (?:reach|fetch|resolve)/i,
+  /internal server error/i,
+  /deadline exceeded/i,
+  /temporarily unavailable/i,
+];
+
+function isTransientError(message) {
+  return TRANSIENT_ERROR_PATTERNS.some(pattern => pattern.test(message));
+}
+
 let disabledUntil = 0;
 let lastFailureAt = null;
 
@@ -120,10 +138,22 @@ async function query(document, variables) {
 
   const errors = response.data?.errors;
   if (errors?.length) {
-    // Schema-level errors ("Cannot query field...") mean Twitch changed the shape under us and the
-    // query in the calling module needs re-deriving; a bare "server error" at a path is usually
-    // transient. Both are logged the same way - loudly, once per call, without failing the caller.
-    console.error('[GQL] errors:', JSON.stringify(errors.map(e => e.message)).slice(0, 500));
+    // Two very different things arrive in this array, and they were logged identically until
+    // 2026-08-12 - which put "service timeout" on the admin panel in the same red as a broken
+    // query, for something that fixes itself on the next poll and costs one refresh cycle of an
+    // optional field. Schema-level errors ("Cannot query field...") mean Twitch changed the shape
+    // under us and the query in the calling module genuinely needs re-deriving; Twitch's own
+    // server-side hiccups at a path do not. Neither fails the caller - see the header.
+    const messages = errors.map(e => String(e?.message || ''));
+    const summary = JSON.stringify(messages).slice(0, 500);
+    if (messages.every(isTransientError)) {
+      console.warn(
+        '[GQL] Twitch answered with a transient error - the affected viewer-card fields are ' +
+        'missing this cycle and refill on the next refresh:', summary
+      );
+    } else {
+      console.error('[GQL] errors:', summary);
+    }
   }
 
   return response.data?.data || null;
