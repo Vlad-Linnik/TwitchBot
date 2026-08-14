@@ -122,17 +122,39 @@ async function findUnenriched(channelId) {
 // and done, while a moderator can leave a comment on a case that is open in front of another
 // moderator right now. Keeping the two passes separate also means a GraphQL outage never blocks
 // the Helix enrichment, or vice versa.
-async function findStaleViewerCards(channelId, staleBefore) {
+//
+// `viewerCardRetryAfter` is the per-case half of the backoff added 2026-08-14. A card fetch that
+// FAILS writes nothing, so before this the doc stayed exactly as stale as it was and came straight
+// back on the next 60s tick - forever, per case. That is one half of how a dead GraphQL endpoint
+// turned into hundreds of identical error lines; twitch/gqlClient.js's breaker is the other, and
+// they solve different problems (this one keeps a single unlucky case from monopolising the
+// budget, the breaker keeps a dead endpoint from being called at all).
+//
+// Sorted oldest-first so the per-tick ceiling in twitch/unbanRequestScheduler.js is a queue rather
+// than a lottery: a case that keeps losing the draw would otherwise never be enriched at all.
+async function findStaleViewerCards(channelId, staleBefore, now = new Date()) {
   const col = await ensureCollection();
   return col
     .find({
       channelId,
       twitchStatus: 'pending',
-      $or: [
-        { 'twitchModLogs.fetchedAt': { $exists: false } },
-        { 'twitchModLogs.fetchedAt': { $lt: staleBefore } },
+      $and: [
+        {
+          $or: [
+            { 'twitchModLogs.fetchedAt': { $exists: false } },
+            { 'twitchModLogs.fetchedAt': { $lt: staleBefore } },
+          ],
+        },
+        {
+          $or: [
+            { viewerCardRetryAfter: null },
+            { viewerCardRetryAfter: { $exists: false } },
+            { viewerCardRetryAfter: { $lte: now } },
+          ],
+        },
       ],
     })
+    .sort({ requestedAt: 1 })
     .toArray();
 }
 

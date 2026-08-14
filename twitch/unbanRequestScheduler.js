@@ -48,10 +48,28 @@ const MAX_SNIPER_SEC = 3600;
 // Get Chatters list - that list includes silent lurkers with the chat window merely open, which
 // is how the sniper could previously pick someone who hadn't typed in days.
 const SNIPER_ACTIVITY_WINDOW_MS = 2 * 60 * 1000;
-// How long a mirrored viewer card stays fresh. Longer than the poll interval on purpose: the
-// counts barely move, and the one thing that does - a moderator adding a comment - reaching the
-// page within five minutes is fine for a queue that is reviewed by hand.
-const VIEWER_CARD_TTL_MS = 5 * 60 * 1000;
+// How long a mirrored viewer card stays fresh.
+//
+// Raised from 5 minutes to 30 on 2026-08-14, deliberately trading freshness for call volume. The
+// old figure meant every case sitting in a queue cost 12 GraphQL calls an hour FOREVER - an appeal
+// nobody has got to in three days had spent ~860 of them, on an undocumented endpoint that is
+// rate-limited and integrity-gated, to re-read counts that had not moved. The only genuinely
+// mutable fact here is a moderator adding a comment mid-review, and 30 minutes is still well
+// inside the tempo of a queue reviewed by hand.
+//
+// Note the FIRST fetch is unaffected: a freshly mirrored case has no `twitchModLogs` at all, so it
+// is picked up on the very next tick and the dossier is ready before anyone opens it.
+const VIEWER_CARD_TTL_MS = 30 * 60 * 1000;
+// Ceiling on viewer-card fetches per channel per tick. A backlog (or a queue that just came back
+// after the breaker re-opened) would otherwise fire one request per pending case in a tight loop,
+// which is the burst pattern most likely to be read as automation at the other end. At one tick a
+// minute this still drains a 30-case backlog in ten minutes.
+const MAX_VIEWER_CARDS_PER_TICK = 3;
+// Per-case backoff after a failed card fetch, doubling per consecutive failure up to the cap. The
+// first step is deliberately longer than the poll interval - retrying a specific case faster than
+// that is what the old code did, and it never once helped.
+const VIEWER_CARD_RETRY_BASE_MS = 5 * 60 * 1000;
+const VIEWER_CARD_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 
 let interval;
 let sniperInterval;
@@ -130,20 +148,38 @@ async function enrichChannel(login, channelId) {
 // Entirely optional: without a configured token gqlClient is disabled, getViewerCard returns null,
 // nothing is written, and the review page falls back to the bot's own ModeratorActionLogs counts.
 async function refreshViewerCards(channelId) {
+  // The breaker's whole point: when Twitch is refusing these outright there is nothing to gain
+  // from finding out again once a minute per case.
   if (!gqlClient.isEnabled()) return;
 
   const staleBefore = new Date(Date.now() - VIEWER_CARD_TTL_MS);
   const cases = await unbanRequestsRepo.findStaleViewerCards(channelId, staleBefore);
 
-  for (const doc of cases) {
+  for (const doc of cases.slice(0, MAX_VIEWER_CARDS_PER_TICK)) {
     // Sequential, one case at a time - same deliberate no-concurrency choice as enrichChannel()
     // and longBanScheduler.tick(), to keep this poller's outbound footprint predictable.
     const card = await viewerCardModLogs.getViewerCard(channelId, doc.userId);
-    // A failed lookup leaves the previous card in place rather than blanking it: stale counts beat
-    // no counts on a page a moderator is judging an appeal from.
-    if (!card) continue;
+
+    if (!card) {
+      // A failed lookup leaves the previous card in place rather than blanking it: stale counts
+      // beat no counts on a page a moderator is judging an appeal from. What it must NOT do is
+      // leave the doc eligible again immediately - see findStaleViewerCards()'s note.
+      const attempts = (doc.viewerCardAttempts || 0) + 1;
+      const backoff = Math.min(VIEWER_CARD_RETRY_MAX_MS, VIEWER_CARD_RETRY_BASE_MS * 2 ** (attempts - 1));
+      await unbanRequestsRepo.updateById(doc._id, {
+        viewerCardAttempts: attempts,
+        viewerCardRetryAfter: new Date(Date.now() + backoff),
+      });
+      // The breaker may have tripped on this very call, in which case the rest of this channel's
+      // backlog is not worth walking.
+      if (!gqlClient.isEnabled()) return;
+      continue;
+    }
+
     await unbanRequestsRepo.updateById(doc._id, {
       twitchModLogs: { ...card, fetchedAt: new Date() },
+      viewerCardAttempts: 0,
+      viewerCardRetryAfter: null,
     });
   }
 }
@@ -299,18 +335,25 @@ async function fireSniper(channelLogin, settings) {
       : Math.min(MAX_SNIPER_SEC, Math.max(MIN_SNIPER_SEC, Number(settings.sniperTimeoutSec) || 60));
   const reason = settings.sniperReason || 'Шальная пуля Бюро амнистии';
 
-  let success = true;
+  // TwitchBanAPI now RETURNS whether Twitch accepted the action (it logged nothing and swallowed
+  // everything until 2026-08-14, so this said `success: true` for a shot that never landed - which
+  // is what "выстрел не всегда банит" turned out to be reporting). It still doesn't throw, so the
+  // catch stays for anything more unusual than a rejected request.
+  let success = false;
   try {
-    if (mode === 'ban') {
-      await TwitchBanAPI.ban(target.user_id, broadcasterId, reason);
-    } else {
-      await TwitchBanAPI.timeout(target.user_id, durationSec, broadcasterId, reason);
-    }
+    success = mode === 'ban'
+      ? await TwitchBanAPI.ban(target.user_id, broadcasterId, reason)
+      : await TwitchBanAPI.timeout(target.user_id, durationSec, broadcasterId, reason);
   } catch (error) {
-    // TwitchBanAPI.timeout/ban swallow their own errors, so this only catches something more
-    // unusual - but the sub-document promises `success`, so it has to be honest about it.
-    success = false;
     console.error(`[UnbanRequests] Sniper ${mode} failed in ${channel}:`, describeError(error));
+  }
+
+  if (!success) {
+    // TwitchBanAPI has already logged the reason Twitch gave; this line is what ties it to a shot.
+    console.error(
+      `[UnbanRequests] Sniper ${mode} in ${channel} was rejected by Twitch ` +
+      `(target @${target.user_login}) - the shot is recorded as a miss.`
+    );
   }
 
   return {
@@ -395,8 +438,15 @@ async function fireQueuedShots() {
       return null;
     });
 
+    // Three distinguishable outcomes, and the review desk needs all three: a hit, a shot with
+    // nobody eligible to hit, and a target Twitch then refused to act on. The last two were
+    // indistinguishable (and the third was reported as a hit) until 2026-08-14.
     await sniperShotsRepo.complete(shot._id, outcome
-      ? { status: outcome.success ? 'done' : 'failed', ...outcome }
+      ? {
+        status: outcome.success ? 'done' : 'failed',
+        ...outcome,
+        failureReason: outcome.success ? null : 'twitch_rejected',
+      }
       : { status: 'failed', failureReason: 'no_target' });
   }
 }
