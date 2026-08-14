@@ -173,11 +173,11 @@ let envMtimeMs = 0;
 //
 // This token dies with the browser session that issued it, and replacing it is a manual capture -
 // so it is the one credential here that a human edits into .env while the bot is running. dotenv
-// reads that file exactly once at require time, so until this existed the only way to apply a
-// replacement was restarting the process: dropping tmi.js and EventSub for every channel to pick up
-// an optional dossier field. Verified 2026-08-15, when both a freshly captured prod token and the
-// local one answered HTTP 200 while prod kept logging `token rejected` from the value it had loaded
-// hours earlier.
+// reads that file exactly once at require time, and it also refuses to override a variable already
+// present in the environment, so the in-memory value can silently disagree with the file. Reading
+// the file itself is the only way to be sure which value is in play, and it means a replacement
+// applies without restarting the process - dropping tmi.js and EventSub for every channel to pick
+// up an optional dossier field.
 //
 // Gated on mtime so this costs one stat() per call, and only ever touches this one key -
 // TokenManager owns password/refresh_token in the same file and rewrites them from memory.
@@ -193,11 +193,14 @@ function syncTokenFromEnvFile() {
 
   let value = '';
   try {
+    // LAST occurrence wins, matching dotenv's own behaviour on a duplicated key (verified) - a
+    // token appended below an older line is the single most likely way this file gets edited by
+    // hand, and disagreeing with dotenv here would mean the bot used one value and this used the
+    // other.
     for (const line of fs.readFileSync(ENV_PATH, 'utf8').split('\n')) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('gql_auth_token=')) continue;
       value = trimmed.slice('gql_auth_token='.length).trim().replace(/^["']|["']$/g, '');
-      break;
     }
   } catch {
     return;
