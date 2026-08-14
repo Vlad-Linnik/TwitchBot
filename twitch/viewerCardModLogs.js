@@ -88,15 +88,22 @@ function actionBlock({ key, type }) {
 // The count fields are aliases over one `targetedActions(type:)` field; WARN is the enum value for
 // a warning (WARNING is rejected), and its count comes back null - not 0 - for a user who has
 // never been warned.
-// Subscription status is a THREE-state answer, and collapsing it to a boolean would put a lie on
-// the dossier. `subscriptionBenefit: null` means "not subscribed" only when the channel actually
-// sells subscriptions - an unaffiliated channel has an empty `subscriptionProducts` and nobody
-// CAN subscribe to it, which is why #vlad_261 reads null for every viewer (verified against
-// #forsen, which returns three tiers). The page says which of the two it is.
+// `User.relationship` IS NOT HERE ANY MORE, and must not be added back without re-testing.
 //
-// Note the relationship is read from the TARGET's side (`user(id: targetID).relationship(
-// targetUserID: channelID)`) - that's the direction Twitch's own card uses, and its `followedAt`
-// matches the Helix follow lookup the bot already does to the second.
+// It used to supply the applicant's subscription state (`relationship.subscriptionBenefit`), read
+// from the TARGET's side the way Twitch's own card does. As of 2026-08-14 Twitch put that one field
+// behind its anti-automation gate: a document containing it is answered `failed integrity check`
+// and NOTHING in the document resolves - one gated field costs the entire dossier, comments, counts
+// and all. Bisected 2026-08-15 (scripts/local/gqlBisect.js): every other top-level block here still
+// answers normally with the identical token, headers and machine, and both `relationship`
+// sub-fields - `subscriptionBenefit` AND `followedAt` - are refused, so it is the field itself that
+// is closed rather than anything about subscriptions.
+//
+// It is dropped rather than retried in a second request: it fails identically every time, so a
+// separate call would just trip gqlClient's breaker and take the working half down with it. What
+// survives is `channelUser.subscriptionProducts`, which is CHANNEL data and still answers - enough
+// to keep saying "nobody can subscribe to this channel", never enough to say "this user is not
+// subscribed". See toSubscription() for why that distinction is worth the extra state.
 // `chatModeratorStrikeStatus` and `lowTrustUserProperties` are ROOT fields, not part of
 // viewerCardModLogs, and both take (channelID, userID) - not the targetID/targetUserID spelling
 // the mod-log fields use.
@@ -132,11 +139,6 @@ const DOSSIER_QUERY = `
             isEnabled isModCommentsSharingDisabled shareWithTypes treatment
           }
         }
-      }
-    }
-    targetUser: user(id: $targetID) {
-      relationship(targetUserID: $channelID) {
-        subscriptionBenefit { tier purchasedWithPrime }
       }
     }
     channelUser: user(id: $channelID) {
@@ -343,22 +345,25 @@ function toBanSharing(settings) {
   };
 }
 
-// See DOSSIER_QUERY's note: `state` is 'subscribed' | 'none' | 'unavailable', never a boolean.
-// `tier` arrives as "1000"/"2000"/"3000" and is reported as 1/2/3; anything unrecognised stays
-// null so the page says "subscribed" without inventing a tier.
+// What is left of the subscription read now that `relationship` is gated (see DOSSIER_QUERY):
+// 'unavailable' when Twitch says the channel sells no subscriptions, and NULL - "we don't know" -
+// for everyone else. Both consumers already render a null subscription as "неизвестно" /
+// "Subscription unknown" (TwitchBot-Web's unban-bureau.js and lib/unbanCaseBrief.js), so this needs
+// no change on the web side.
+//
+// Deliberately NOT 'none'. That value asserts the applicant chose not to support the channel, which
+// is a mark against them in an amnesty argument, and we can no longer see it either way - the exact
+// mistake the three-state design was built to avoid, just moved one state along. 'subscribed' is
+// unreachable for the same reason and stays in the vocabulary only for stored documents mirrored
+// before 2026-08-14.
 function toSubscription(data) {
-  const benefit = data?.targetUser?.relationship?.subscriptionBenefit;
-  if (benefit) {
-    const tier = { 1000: 1, 2000: 2, 3000: 3 }[Number(benefit.tier)] || null;
-    return { state: 'subscribed', tier, prime: Boolean(benefit.purchasedWithPrime) };
-  }
   const products = data?.channelUser?.subscriptionProducts;
   // An absent products list (rather than an empty one) means the lookup itself failed - report
   // "unavailable" only when Twitch actually said the channel has no tiers.
   if (Array.isArray(products) && products.length === 0) {
     return { state: 'unavailable', tier: null, prime: false };
   }
-  return { state: 'none', tier: null, prime: false };
+  return null;
 }
 
 // Everything the viewer card knows about this user in this channel.
