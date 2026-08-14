@@ -40,6 +40,9 @@ async function ensureCollection() {
     await collection.createIndex({ 'vote.status': 1, 'vote.endsAt': 1 });
     // findActiveVoteInChannel: the per-channel eviction lookup on every vote start.
     await collection.createIndex({ channelId: 1, 'vote.status': 1 });
+    // findViewerCardRequested, run by the 2s fast tick. Null on all but the handful of cases a
+    // moderator has open right now, so this stays a tiny index however long the queue gets.
+    await collection.createIndex({ viewerCardRequestedAt: 1 });
     indexesEnsured = true;
   }
   return collection;
@@ -115,47 +118,58 @@ async function findUnenriched(channelId) {
   return col.find({ channelId, enrichedAt: null }).toArray();
 }
 
-// Still-open requests whose viewer-card half (Twitch's own moderator comments and action counts,
-// twitch/viewerCardModLogs.js) has never been fetched or has gone stale.
+// Cases a moderator has actually OPENED whose viewer-card half (Twitch's own moderator comments and
+// action counts, twitch/viewerCardModLogs.js) is missing or stale.
 //
-// Deliberately NOT folded into findUnenriched: those facts are immutable per user, fetched once
-// and done, while a moderator can leave a comment on a case that is open in front of another
-// moderator right now. Keeping the two passes separate also means a GraphQL outage never blocks
-// the Helix enrichment, or vice versa.
+// `viewerCardRequestedAt` is written by TwitchBot-Web when it serves a case's dossier.json - the
+// same "the site asks, the bot executes" contract as `resolution.status: 'pending'` and
+// `vote.status: 'requested'`, and for the same reason: the web app holds no Twitch credentials and
+// cannot fetch this itself.
 //
-// `viewerCardRetryAfter` is the per-case half of the backoff added 2026-08-14. A card fetch that
-// FAILS writes nothing, so before this the doc stayed exactly as stale as it was and came straight
-// back on the next 60s tick - forever, per case. That is one half of how a dead GraphQL endpoint
-// turned into hundreds of identical error lines; twitch/gqlClient.js's breaker is the other, and
-// they solve different problems (this one keeps a single unlucky case from monopolising the
-// budget, the breaker keeps a dead endpoint from being called at all).
+// UNTIL 2026-08-15 THIS PASS WAS A BACKGROUND SWEEP over every pending case on a 30-minute TTL, and
+// that was the wrong shape. A moderator reads one appeal at a time, but the bot was mirroring the
+// whole queue whether anyone opened it or not: an appeal nobody had got to in three days cost ~144
+// requests to an undocumented, rate-limited, integrity-gated endpoint, where one would have done.
+// On demand it is one request per case actually opened, and none at all for a quiet queue.
 //
-// Sorted oldest-first so the per-tick ceiling in twitch/unbanRequestScheduler.js is a queue rather
-// than a lottery: a case that keeps losing the draw would otherwise never be enriched at all.
-async function findStaleViewerCards(channelId, staleBefore, now = new Date()) {
+// The 30-minute TTL survives as a freshness check rather than a schedule - reopening the same case
+// inside the window re-reads nothing. That check is deliberately NOT in this query: the flag has to
+// come off every doc it is set on, fetch or no fetch, or a case opened once while its card was
+// fresh would keep the flag forever and get re-fetched on the TTL for as long as it stays pending -
+// which is the background sweep this replaced, wearing a different hat. So the query returns
+// everything flagged and twitch/unbanRequestScheduler.js (which owns the TTL constant) decides.
+//
+// Deliberately NOT folded into findUnenriched: those facts are immutable per user, fetched once and
+// done, while a moderator can leave a comment on a case that is open in front of another moderator
+// right now. Keeping the two passes separate also means a GraphQL outage never blocks the Helix
+// enrichment, or vice versa.
+//
+// `viewerCardRetryAfter` is the per-case half of the backoff added 2026-08-14 - see the scheduler
+// for why it now only ever arms on a per-case failure. Sorted oldest-request-first so the per-tick
+// ceiling is a queue rather than a lottery.
+async function findViewerCardRequested(now = new Date()) {
   const col = await ensureCollection();
   return col
     .find({
-      channelId,
       twitchStatus: 'pending',
-      $and: [
-        {
-          $or: [
-            { 'twitchModLogs.fetchedAt': { $exists: false } },
-            { 'twitchModLogs.fetchedAt': { $lt: staleBefore } },
-          ],
-        },
-        {
-          $or: [
-            { viewerCardRetryAfter: null },
-            { viewerCardRetryAfter: { $exists: false } },
-            { viewerCardRetryAfter: { $lte: now } },
-          ],
-        },
+      viewerCardRequestedAt: { $ne: null, $exists: true },
+      $or: [
+        { viewerCardRetryAfter: null },
+        { viewerCardRetryAfter: { $exists: false } },
+        { viewerCardRetryAfter: { $lte: now } },
       ],
     })
-    .sort({ requestedAt: 1 })
+    .sort({ viewerCardRequestedAt: 1 })
     .toArray();
+}
+
+// Drops the "a moderator opened this" flag without fetching anything. Used for a case whose stored
+// card is still inside the TTL: the site sets the flag on every first dossier load (it does not
+// know the TTL), so this is the common outcome, and leaving the flag set would make the fast tick
+// re-examine the same doc every 2 seconds forever.
+async function clearViewerCardRequest(id) {
+  const col = await ensureCollection();
+  await col.updateOne({ _id: id }, { $set: { viewerCardRequestedAt: null } });
 }
 
 // Requests we still hold as pending whose ids Twitch no longer returns - resolved elsewhere.
@@ -239,7 +253,8 @@ module.exports = {
   RESOLVED_ELSEWHERE,
   upsertFromTwitch,
   findUnenriched,
-  findStaleViewerCards,
+  findViewerCardRequested,
+  clearViewerCardRequest,
   markMissingAsResolvedElsewhere,
   findResolutionPending,
   findVoteRequested,
