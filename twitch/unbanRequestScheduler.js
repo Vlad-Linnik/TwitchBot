@@ -164,15 +164,31 @@ async function refreshViewerCards(channelId) {
       // A failed lookup leaves the previous card in place rather than blanking it: stale counts
       // beat no counts on a page a moderator is judging an appeal from. What it must NOT do is
       // leave the doc eligible again immediately - see findStaleViewerCards()'s note.
+      //
+      // But TWO very different failures land here and only one of them is this case's fault.
+      //
+      // A GLOBAL failure - the endpoint refusing everything, an outage, a dead token - is already
+      // answered by gqlClient's breaker, which stops the calls outright. Parking the case on top of
+      // that punishes it for something it had no part in, and the punishment badly outlives the
+      // cause: through the 2026-08-14 integrity refusal every open case doubled its way to the
+      // 6-hour cap, so when the gated field was found and dropped on 2026-08-15 the queue went on
+      // showing no Twitch data for hours with nothing visibly wrong and nothing in the log. The
+      // rest of the backlog isn't worth walking either, which is what this return used to be for.
+      //
+      // A PER-CASE failure - the query answered fine but `viewerCardModLogs` came back null for
+      // this one user - is what the backoff was written for, and still parks.
+      //
+      // The two are distinguishable without widening getViewerCard()'s contract: gqlClient counts
+      // every global failure and zeroes that counter the moment a call returns data, so a non-zero
+      // count here means this request never got an answer at all.
+      if (gqlClient.getStatus().consecutiveFailures > 0) return;
+
       const attempts = (doc.viewerCardAttempts || 0) + 1;
       const backoff = Math.min(VIEWER_CARD_RETRY_MAX_MS, VIEWER_CARD_RETRY_BASE_MS * 2 ** (attempts - 1));
       await unbanRequestsRepo.updateById(doc._id, {
         viewerCardAttempts: attempts,
         viewerCardRetryAfter: new Date(Date.now() + backoff),
       });
-      // The breaker may have tripped on this very call, in which case the rest of this channel's
-      // backlog is not worth walking.
-      if (!gqlClient.isEnabled()) return;
       continue;
     }
 
