@@ -35,9 +35,13 @@
 // how twitch/viewerCardModLogs.js's query was derived. Note most fields here return UNION types
 // (`ModLogsCommentsResult`, `ModLogsTargetedActionsResult`), so their bodies must be inline
 // fragments - querying them directly reads as "cannot query field edges on type ...Result".
+const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
 const botInitInfo = require('../botInitInfo.js');
 const describeError = require('../shared/describeError.js');
+
+const ENV_PATH = path.join(__dirname, '..', '.env');
 
 const GQL_URL = 'https://gql.twitch.tv/gql';
 // twitch.tv's own web client id. Public knowledge (it ships in every page load) and NOT a secret -
@@ -163,9 +167,64 @@ function token() {
   return botInitInfo.settings['gql_auth_token'] || '';
 }
 
+let envMtimeMs = 0;
+
+// Re-read `gql_auth_token` from .env when the file has changed on disk.
+//
+// This token dies with the browser session that issued it, and replacing it is a manual capture -
+// so it is the one credential here that a human edits into .env while the bot is running. dotenv
+// reads that file exactly once at require time, and it also refuses to override a variable already
+// present in the environment, so the in-memory value can silently disagree with the file. Reading
+// the file itself is the only way to be sure which value is in play, and it means a replacement
+// applies without restarting the process - dropping tmi.js and EventSub for every channel to pick
+// up an optional dossier field.
+//
+// Gated on mtime so this costs one stat() per call, and only ever touches this one key -
+// TokenManager owns password/refresh_token in the same file and rewrites them from memory.
+function syncTokenFromEnvFile() {
+  let mtimeMs;
+  try {
+    mtimeMs = fs.statSync(ENV_PATH).mtimeMs;
+  } catch {
+    return;
+  }
+  if (mtimeMs === envMtimeMs) return;
+  envMtimeMs = mtimeMs;
+
+  let value = '';
+  try {
+    // LAST occurrence wins, matching dotenv's own behaviour on a duplicated key (verified) - a
+    // token appended below an older line is the single most likely way this file gets edited by
+    // hand, and disagreeing with dotenv here would mean the bot used one value and this used the
+    // other.
+    for (const line of fs.readFileSync(ENV_PATH, 'utf8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('gql_auth_token=')) continue;
+      value = trimmed.slice('gql_auth_token='.length).trim().replace(/^["']|["']$/g, '');
+    }
+  } catch {
+    return;
+  }
+  if (value === token()) return;
+
+  botInitInfo.settings['gql_auth_token'] = value;
+  // A new token is a new state: whatever the old one was being punished for no longer applies, so
+  // the pause and the breaker's counters are cleared rather than left to expire.
+  disabledUntil = 0;
+  consecutiveFailures = 0;
+  backoffTrips = 0;
+  lastFailureReason = null;
+  console.log(
+    value
+      ? '[GQL] gql_auth_token changed in .env - resuming viewer-card lookups with the new token.'
+      : '[GQL] gql_auth_token removed from .env - viewer-card lookups are now disabled.'
+  );
+}
+
 // Whether a call is worth attempting at all. Callers use this to skip silently instead of logging
 // a failure per request on an install that simply never configured a token.
 function isEnabled() {
+  syncTokenFromEnvFile();
   return Boolean(token()) && Date.now() >= disabledUntil;
 }
 
@@ -175,6 +234,7 @@ function isEnabled() {
 // it can lag up to DISABLE_AFTER_AUTH_FAIL_MS behind an actual fix, same as the console.error it
 // mirrors.
 function getStatus() {
+  syncTokenFromEnvFile();
   return {
     configured: Boolean(token()),
     disabled: Date.now() < disabledUntil,
@@ -213,9 +273,15 @@ async function query(document, variables) {
       lastFailureAt = new Date();
       lastFailureReason = 'token rejected';
       consecutiveFailures += 1;
+      // The fingerprint says WHICH value was rejected, which is the whole question when someone has
+      // already replaced the token: a live token failing here means the process is still holding the
+      // old one, not that the capture was bad. Four of thirty characters identifies the value
+      // without being usable as one.
+      const value = token();
       console.error(
         '[GQL] token rejected - viewer-card lookups disabled for 30 min. Re-capture the auth-token ' +
-        'cookie of a logged-in moderator session into .env gql_auth_token:',
+        `cookie of a logged-in moderator session into .env gql_auth_token (token in use: ${value.length} chars, ` +
+        `ending ...${value.slice(-4)}):`,
         describeError(error)
       );
       return null;
