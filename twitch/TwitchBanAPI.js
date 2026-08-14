@@ -5,6 +5,17 @@ const describeError = require("../shared/describeError.js");
 const max_timeout = 1_209_600; // equivalent to 2 weeks
 const min_timeout = 1;
 
+// Both writers below return true/false and LOG their failures, which they did not until
+// 2026-08-14: timeout() had a completely empty catch block and ban() logged the bare string
+// "timeout error!" with no channel, no target and no error in it.
+//
+// That silence is what made "the AWP shot doesn't always ban anyone" unanswerable. Twitch refuses
+// this endpoint for several ordinary reasons - the target is a moderator or the broadcaster (400),
+// the user token has lapsed (401), too many actions too quickly (429) - and every one of them
+// looked from the outside exactly like a successful ban that didn't happen. The Бюро амнистии
+// sniper additionally reported `success: true` for all of them, because it could only detect a
+// THROWN error and these never threw.
+//
 // /timeout
 async function timeout(userId, duration, broadcasterId, reason = "No reason") {
   const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${botInitInfo.settings["bot_id"]}`;
@@ -23,7 +34,13 @@ async function timeout(userId, duration, broadcasterId, reason = "No reason") {
 
   try {
     await axios.post(url, data, { headers: headers });
+    return true;
   } catch (error) {
+    console.error(
+      `[TwitchBanAPI] timeout failed (user ${userId}, channel ${broadcasterId}, ${duration}s):`,
+      describeError(error)
+    );
+    return false;
   }
 }
 // /ban
@@ -43,8 +60,13 @@ async function ban(userId, broadcasterId, reason = "No reason") {
 
   try {
     await axios.post(url, data, { headers: headers });
+    return true;
   } catch (error) {
-    console.log("timeout error!");
+    console.error(
+      `[TwitchBanAPI] ban failed (user ${userId}, channel ${broadcasterId}):`,
+      describeError(error)
+    );
+    return false;
   }
 }
 
