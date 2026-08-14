@@ -57,13 +57,14 @@ const SNIPER_ACTIVITY_WINDOW_MS = 2 * 60 * 1000;
 // mutable fact here is a moderator adding a comment mid-review, and 30 minutes is still well
 // inside the tempo of a queue reviewed by hand.
 //
-// Note the FIRST fetch is unaffected: a freshly mirrored case has no `twitchModLogs` at all, so it
-// is picked up on the very next tick and the dossier is ready before anyone opens it.
+// Since 2026-08-15 this is a FRESHNESS check, not a schedule: nothing re-reads a card on a timer
+// any more (see fetchRequestedViewerCards), so what it actually buys is that a moderator clicking
+// back and forth between two appeals pays for each of them once, not once per click.
 const VIEWER_CARD_TTL_MS = 30 * 60 * 1000;
-// Ceiling on viewer-card fetches per channel per tick. A backlog (or a queue that just came back
-// after the breaker re-opened) would otherwise fire one request per pending case in a tight loop,
-// which is the burst pattern most likely to be read as automation at the other end. At one tick a
-// minute this still drains a 30-case backlog in ten minutes.
+// Ceiling on viewer-card fetches per fast tick, across all channels. The real bound is now how many
+// cases moderators opened in the last two seconds, which is a very small number - this is the
+// safety net for the burst that isn't, since firing one request per case in a tight loop is the
+// pattern most likely to be read as automation at the other end.
 const MAX_VIEWER_CARDS_PER_TICK = 3;
 // Per-case backoff after a failed card fetch, doubling per consecutive failure up to the cap. The
 // first step is deliberately longer than the poll interval - retrying a specific case faster than
@@ -109,7 +110,8 @@ async function mirrorChannel(login) {
   await unbanRequestsRepo.markMissingAsResolvedElsewhere(channelId, requests.map(r => r.id));
 
   await enrichChannel(login, channelId);
-  await refreshViewerCards(channelId);
+  // Viewer cards are NOT fetched here any more - they moved onto fastTick()'s 2s cadence and are
+  // driven by a moderator actually opening a case. See fetchRequestedViewerCards().
 }
 
 // Fills in the Twitch-sourced dossier facts once per request. Kept separate from the mirroring
@@ -136,34 +138,57 @@ async function enrichChannel(login, channelId) {
   }
 }
 
-// Mirrors Twitch's own viewer-card facts onto each open case: the moderator comments left on the
-// user, and this channel's REAL lifetime ban/timeout/warning counts for them.
+// Mirrors Twitch's own viewer-card facts onto the case a moderator has just OPENED: the comments
+// left on the user, and this channel's REAL lifetime ban/timeout/warning counts for them.
 //
 // These come from Twitch's private GraphQL (twitch/gqlClient.js), which is why they are the bot's
-// job like everything else Twitch-facing. Two reasons this is a separate pass from enrichChannel:
-// the facts are MUTABLE (a moderator can comment on a case that is open on someone's screen right
-// now, hence the refetch on a TTL rather than once), and a GraphQL outage must not stop the Helix
-// enrichment or vice versa.
+// job like everything else Twitch-facing - TwitchBot-Web holds no Twitch credentials at all, so it
+// can only write the request (`viewerCardRequestedAt`, set when it serves dossier.json) and wait.
+// Same contract as a verdict or a vote.
+//
+// ON DEMAND SINCE 2026-08-15, AND THAT IS THE POINT. This used to be a background sweep over every
+// pending case on a 30-minute TTL, which meant the bot mirrored the entire queue whether anyone
+// opened it or not: an appeal nobody had reached in three days cost ~144 requests to an
+// undocumented, rate-limited, integrity-gated endpoint where exactly one was needed. Now a quiet
+// queue costs nothing at all, and a case costs one request the first time it is opened.
+//
+// It rides fastTick()'s 2s cadence rather than tick()'s 60s for the obvious reason: a moderator is
+// sitting in front of the page waiting for it. 60 seconds is what made pre-fetching look necessary
+// in the first place.
 //
 // Entirely optional: without a configured token gqlClient is disabled, getViewerCard returns null,
 // nothing is written, and the review page falls back to the bot's own ModeratorActionLogs counts.
-async function refreshViewerCards(channelId) {
+async function fetchRequestedViewerCards() {
   // The breaker's whole point: when Twitch is refusing these outright there is nothing to gain
-  // from finding out again once a minute per case.
+  // from finding out again every two seconds.
   if (!gqlClient.isEnabled()) return;
 
+  const cases = await unbanRequestsRepo.findViewerCardRequested();
+  if (!cases.length) return;
+
   const staleBefore = new Date(Date.now() - VIEWER_CARD_TTL_MS);
-  const cases = await unbanRequestsRepo.findStaleViewerCards(channelId, staleBefore);
 
   for (const doc of cases.slice(0, MAX_VIEWER_CARDS_PER_TICK)) {
+    // Claim first, exactly like fireQueuedShots(): this runs every 2 seconds and a card fetch takes
+    // most of that on a good day, so leaving the flag up would let the next tick start the same
+    // request again. Clearing it also means a FAILED fetch does not re-arm itself - the moderator's
+    // page asks again if it still wants the card, which is what "on demand" has to mean to be worth
+    // anything.
+    await unbanRequestsRepo.clearViewerCardRequest(doc._id);
+
+    // The site sets the flag on every first dossier load because it does not know the TTL; most of
+    // those are a case being reopened minutes later and need no call at all.
+    const fetchedAt = doc.twitchModLogs?.fetchedAt;
+    if (fetchedAt && new Date(fetchedAt) >= staleBefore) continue;
+
     // Sequential, one case at a time - same deliberate no-concurrency choice as enrichChannel()
     // and longBanScheduler.tick(), to keep this poller's outbound footprint predictable.
-    const card = await viewerCardModLogs.getViewerCard(channelId, doc.userId);
+    const card = await viewerCardModLogs.getViewerCard(doc.channelId, doc.userId);
 
     if (!card) {
       // A failed lookup leaves the previous card in place rather than blanking it: stale counts
       // beat no counts on a page a moderator is judging an appeal from. What it must NOT do is
-      // leave the doc eligible again immediately - see findStaleViewerCards()'s note.
+      // leave the doc eligible again immediately - see findViewerCardRequested()'s note.
       //
       // But TWO very different failures land here and only one of them is this case's fault.
       //
@@ -433,13 +458,17 @@ async function processVotes() {
 // ---------------------------------------------------------------------------
 
 // Everything a human at the desk is actively waiting on: a shot they just fired through the scope,
-// and the vote that has to follow the appeal in front of them. tick()'s 60s cadence is for the
-// background reconciliation nobody is watching (mirroring, enrichment, applying verdicts to Twitch).
+// the vote that has to follow the appeal in front of them, and - since 2026-08-15 - the Twitch half
+// of the dossier for the case they just opened. tick()'s 60s cadence is for the background
+// reconciliation nobody is watching (mirroring, enrichment, applying verdicts to Twitch).
 async function fastTick() {
   await processVotes().catch(err =>
     console.error('[UnbanRequests] Vote processing failed:', describeError(err))
   );
   await fireQueuedShots();
+  await fetchRequestedViewerCards().catch(err =>
+    console.error('[UnbanRequests] Viewer-card fetch failed:', describeError(err))
+  );
 }
 
 async function fireQueuedShots() {
@@ -539,9 +568,9 @@ module.exports = {
   // to check without a live Twitch connection.
   pickEligibleChatters,
   fastTick,
-  // Exported so scripts/local/probeModComments.js can drive the real mirroring path against one
-  // channel instead of a hand-copied version of it.
-  refreshViewerCards,
+  // Exported so scripts/local/probeModComments.js can drive the real mirroring path instead of a
+  // hand-copied version of it.
+  fetchRequestedViewerCards,
   POLL_INTERVAL_MS,
   SNIPER_POLL_MS,
   MIN_SNIPER_SEC,
