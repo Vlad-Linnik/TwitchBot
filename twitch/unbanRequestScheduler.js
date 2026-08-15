@@ -38,7 +38,26 @@ const POLL_INTERVAL_MS = 60 * 1000;
 // Two missed mirror ticks plus slack before a failure counts as an outage rather than a blip.
 const MIRROR_HEALTH_GRACE_MS = POLL_INTERVAL_MS * 2 + 30 * 1000;
 // The fast poll - see fastTick() for what belongs on it and why it's 30x faster than the main one.
-const SNIPER_POLL_MS = 2000;
+//
+// TWO CADENCES, because at one fixed rate this poll was answering a question nobody had asked. Every
+// job on the fast lane is created by a moderator at the desk - a case opened, a vote started, a
+// verdict stamped, a trigger pulled - so a tick that finds nothing has just proved there is nobody
+// there. On an empty desk that was four Mongo round trips and a stat() of .env every two seconds,
+// for ever, on a 2GB VPS.
+//
+// It costs about 1-2ms of CPU per idle tick measured locally, so this is not a fire; it is simply
+// work with no reader. The idle rate is what a moderator waits for ONCE, on the first case they
+// open after a quiet spell (the "Подготовка дела" cover on the desk is what they see meanwhile,
+// and it waits 25s before giving up) - every case after that is answered at the active rate.
+const FAST_POLL_ACTIVE_MS = 2000;
+const FAST_POLL_IDLE_MS = 10 * 1000;
+// How long the fast lane keeps the active rate after the last thing it actually did. Generous on
+// purpose: a moderator reads an appeal for minutes between actions, and dropping to the idle rate
+// mid-session would put a 10-second lag on their next verdict. Sitting at the active rate for five
+// idle minutes costs ~0.3s of CPU - far cheaper than the alternative it buys.
+const FAST_ACTIVE_LINGER_MS = 5 * 60 * 1000;
+// Kept exported under its old name: it is what the tests and the docs call the fast poll.
+const SNIPER_POLL_MS = FAST_POLL_ACTIVE_MS;
 // Hard bounds on the sniper's timeout: a stray ChannelConfig value must not turn a joke mechanic
 // into a 2-week silencing. The ceiling is one hour deliberately - anything longer isn't a game
 // any more, and a moderator who wants that has !longban.
@@ -158,15 +177,23 @@ async function enrichChannel(login, channelId) {
 //
 // Entirely optional: without a configured token gqlClient is disabled, getViewerCard returns null,
 // nothing is written, and the review page falls back to the bot's own ModeratorActionLogs counts.
+// Returns how many flagged cases it dealt with. Zero when the breaker is holding calls back, which
+// is deliberate: rows we are not allowed to act on must not read as "somebody is at the desk", or a
+// dead token would pin the fast lane at its active rate for as long as it stayed dead.
 async function fetchRequestedViewerCards() {
-  // The breaker's whole point: when Twitch is refusing these outright there is nothing to gain
-  // from finding out again every two seconds.
-  if (!gqlClient.isEnabled()) return;
-
+  // Cheapest question first. The Mongo read is indexed and answers in well under a millisecond,
+  // while isEnabled() stat()s .env - and on an empty desk (the overwhelmingly common case) that
+  // syscall would be the only thing this function ever did.
   const cases = await unbanRequestsRepo.findViewerCardRequested();
-  if (!cases.length) return;
+  if (!cases.length) return 0;
+
+  // The breaker's whole point: when Twitch is refusing these outright there is nothing to gain
+  // from finding out again every two seconds. The flags stay up, so the cases are served as soon
+  // as it lets go.
+  if (!gqlClient.isEnabled()) return 0;
 
   const staleBefore = new Date(Date.now() - VIEWER_CARD_TTL_MS);
+  let handled = 0;
 
   for (const doc of cases.slice(0, MAX_VIEWER_CARDS_PER_TICK)) {
     // Claim first, exactly like fireQueuedShots(): this runs every 2 seconds and a card fetch takes
@@ -175,6 +202,7 @@ async function fetchRequestedViewerCards() {
     // page asks again if it still wants the card, which is what "on demand" has to mean to be worth
     // anything.
     await unbanRequestsRepo.clearViewerCardRequest(doc._id);
+    handled += 1;
 
     // The site sets the flag on every first dossier load because it does not know the TTL; most of
     // those are a case being reopened minutes later and need no call at all.
@@ -206,7 +234,7 @@ async function fetchRequestedViewerCards() {
       // The two are distinguishable without widening getViewerCard()'s contract: gqlClient counts
       // every global failure and zeroes that counter the moment a call returns data, so a non-zero
       // count here means this request never got an answer at all.
-      if (gqlClient.getStatus().consecutiveFailures > 0) return;
+      if (gqlClient.getStatus().consecutiveFailures > 0) return handled;
 
       const attempts = (doc.viewerCardAttempts || 0) + 1;
       const backoff = Math.min(VIEWER_CARD_RETRY_MAX_MS, VIEWER_CARD_RETRY_BASE_MS * 2 ** (attempts - 1));
@@ -223,6 +251,8 @@ async function fetchRequestedViewerCards() {
       viewerCardRetryAfter: null,
     });
   }
+
+  return handled;
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +463,8 @@ async function processVoteClosure(doc) {
 // by a human at the desk rather than by a timer: the vote opens when an appeal reaches the window
 // and closes the moment a verdict is stamped. A minute of lag on either would make chat vote on
 // the wrong case.
+// Returns how many votes it actually started or closed, which is what tells the fast lane whether
+// anybody is at the desk - see start().
 async function processVotes() {
   const [requests, closeRequests] = await Promise.all([
     unbanRequestsRepo.findVoteRequested(),
@@ -451,6 +483,8 @@ async function processVotes() {
       console.error(`[UnbanRequests] Failed to start vote in #${doc.channelLogin}:`, describeError(err))
     );
   }
+
+  return requests.length + closeRequests.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,16 +495,25 @@ async function processVotes() {
 // the vote that has to follow the appeal in front of them, and - since 2026-08-15 - the Twitch half
 // of the dossier for the case they just opened. tick()'s 60s cadence is for the background
 // reconciliation nobody is watching (mirroring, enrichment, applying verdicts to Twitch).
+// Returns how many jobs it actually did. Zero means nobody is at any desk - see start() for what
+// the fast lane does with that.
 async function fastTick() {
-  await processVotes().catch(err =>
-    console.error('[UnbanRequests] Vote processing failed:', describeError(err))
-  );
-  await fireQueuedShots();
-  await fetchRequestedViewerCards().catch(err =>
-    console.error('[UnbanRequests] Viewer-card fetch failed:', describeError(err))
-  );
+  const votes = await processVotes().catch(err => {
+    console.error('[UnbanRequests] Vote processing failed:', describeError(err));
+    return 0;
+  });
+  const shots = await fireQueuedShots().catch(err => {
+    console.error('[UnbanRequests] Sniper processing failed:', describeError(err));
+    return 0;
+  });
+  const cards = await fetchRequestedViewerCards().catch(err => {
+    console.error('[UnbanRequests] Viewer-card fetch failed:', describeError(err));
+    return 0;
+  });
+  return votes + shots + cards;
 }
 
+// Returns how many shots it fired, for the same reason processVotes() counts - see start().
 async function fireQueuedShots() {
   const shots = await sniperShotsRepo.findPending();
   for (const shot of shots) {
@@ -494,6 +537,8 @@ async function fireQueuedShots() {
       }
       : { status: 'failed', failureReason: 'no_target' });
   }
+
+  return shots.length;
 }
 
 // A vote marked active in Mongo but absent from memory means the bot restarted mid-vote. Rebuild
@@ -555,10 +600,39 @@ function start(botClient) {
   }, POLL_INTERVAL_MS);
   interval.unref?.();
 
-  sniperInterval = setInterval(() => {
-    fastTick().catch(err => console.error('[UnbanRequests] Fast tick failed:', describeError(err)));
-  }, SNIPER_POLL_MS);
+  // The fast lane RESCHEDULES ITSELF rather than running on setInterval, for two reasons.
+  //
+  // It can change its own rate: a tick that did nothing proves nobody is at a desk (everything on
+  // this lane is created by a moderator sitting at one), so an empty desk drops to
+  // FAST_POLL_IDLE_MS and the first thing that does arrive puts it back on FAST_POLL_ACTIVE_MS for
+  // FAST_ACTIVE_LINGER_MS. Prod measured 2.6% of a core spent on nothing at the fixed rate.
+  //
+  // And it cannot overlap itself: this lane now makes a NETWORK call (the viewer card), which can
+  // outlast a 2-second interval - setInterval would have stacked ticks on top of each other during
+  // exactly the moments the desk was busiest.
+  scheduleFastTick();
+}
+
+let lastFastWorkAt = 0;
+
+// The whole cadence rule, kept pure so it can be checked without driving real timers.
+function nextFastDelay(lastWorkAt, now = Date.now()) {
+  return now - lastWorkAt < FAST_ACTIVE_LINGER_MS ? FAST_POLL_ACTIVE_MS : FAST_POLL_IDLE_MS;
+}
+
+function scheduleFastTick() {
+  sniperInterval = setTimeout(runFastTick, nextFastDelay(lastFastWorkAt));
   sniperInterval.unref?.();
+}
+
+async function runFastTick() {
+  try {
+    if (await fastTick()) lastFastWorkAt = Date.now();
+  } catch (err) {
+    console.error('[UnbanRequests] Fast tick failed:', describeError(err));
+  }
+  // In `finally` position deliberately: a throw here must slow the lane down, never stop it.
+  scheduleFastTick();
 }
 
 module.exports = {
@@ -573,6 +647,10 @@ module.exports = {
   fetchRequestedViewerCards,
   POLL_INTERVAL_MS,
   SNIPER_POLL_MS,
+  FAST_POLL_ACTIVE_MS,
+  FAST_POLL_IDLE_MS,
+  FAST_ACTIVE_LINGER_MS,
+  nextFastDelay,
   MIN_SNIPER_SEC,
   MAX_SNIPER_SEC,
 };

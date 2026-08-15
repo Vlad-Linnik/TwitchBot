@@ -10,7 +10,8 @@
 // happen any number of times per case, or with no case open at all. It is no longer 1:1 with a
 // request, so it no longer belongs inside one.
 //
-// This is polled far more often than anything else in this codebase (SNIPER_POLL_MS, ~2s) because
+// This is polled far more often than anything else in this codebase (FAST_POLL_ACTIVE_MS, ~2s -
+// dropping to FAST_POLL_IDLE_MS once the desk has been quiet, see the scheduler's start()) because
 // it is the one cross-repo write with a human waiting on the result: the moderator has just fired
 // a rifle and expects someone to drop. The collection stays tiny and the query is a covered index
 // hit on `{status: 'pending'}`, so the cost is negligible.
