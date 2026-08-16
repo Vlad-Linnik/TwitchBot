@@ -37,6 +37,9 @@ const { STOPWORDS, isCommandMessage } = require('./textStats.js');
 // компания). Здесь они НЕ вырезаются из строки, а пропускаются с сохранением карты
 // смещений - иначе подсветка на сайте уехала бы относительно исходного текста.
 const INVISIBLE_CHARS = /[­͏​-‏⁠-⁤﻿]/;
+// Тот же набор для замены по всей строке (см. prescan). Строится из того же источника,
+// чтобы два места не разъехались.
+const INVISIBLE_CHARS_ALL = new RegExp(INVISIBLE_CHARS.source, 'g');
 
 // Раскладка: человек начал печатать, не переключив язык. В чате это массовая опечатка,
 // и «abkmnh» -> «фильтр» стоит одной таблицы.
@@ -396,6 +399,104 @@ function extractMentions(text) {
   return out;
 }
 
+// --- дешёвый предфильтр -----------------------------------------------------------------
+//
+// Разбор сообщения (токены + стем каждого токена) стоит ~16 мкс, проверка подстроки - 0,05.
+// А ключевое слово темы встречается в 0,08% сообщений канала. Поэтому перед разбором идёт
+// поиск подстроки по сырой строке, и 99,9% чата до токенизации не доходит вовсе.
+//
+// ГЛАВНОЕ ТРЕБОВАНИЕ: предфильтр обязан быть ТОЧНЫМ - он не имеет права отбросить
+// сообщение, которое findToken() поймал бы. Иначе бот молча перестаёт отвечать на часть
+// вопросов, а страница контроля продолжает уверять, что правило их ловит. Поэтому зонды
+// строятся под каждый из пяти способов сравнения, а не «первые 4 буквы, и ладно»:
+//
+//   точно / по началу слова / внутри слова - все три требуют, чтобы слово содержало ключ
+//     целиком или его начало. Стем - всегда префикс слова (проверено на 308 546 словах
+//     канала: исключений ноль), поэтому подстрока ключа есть и в исходном тексте.
+//   опечатка - принцип Дирихле: если ключ разрезать на (бюджет+1) непересекающихся кусков,
+//     то строка, отличающаяся не более чем на «бюджет» правок, обязана содержать хотя бы
+//     один кусок целиком. Отсюда зонды - куски, а не сам ключ.
+//   раскладка - тот же набор кусков, переведённый обратно в латиницу («фильтр» -> «abkmnh»).
+//
+// Единственное, что предфильтр НЕ проверяет, - границы слова: «фильтрация» его проходит, а
+// findToken() потом отвергает. Это правильная сторона ошибки.
+const LAYOUT_RU_TO_QWERTY = Object.fromEntries(
+  Object.entries(LAYOUT_QWERTY_TO_RU).map(([latin, cyrillic]) => [cyrillic, latin]),
+);
+
+/** «фильтр» -> «abkmnh». null, если хоть один символ не набирается на английской раскладке. */
+function toLatinLayout(word) {
+  let out = '';
+  for (const ch of word) {
+    const mapped = LAYOUT_RU_TO_QWERTY[ch];
+    if (!mapped) return null;
+    out += mapped;
+  }
+  return out;
+}
+
+/** Куски ключа по принципу Дирихле: (бюджет+1) непересекающихся частей, покрывающих ключ. */
+function probeBlocks(key, budget) {
+  // Без опечаток достаточно начала ключа: «по началу слова» гарантирует совпадение только
+  // первых MIN_PREFIX_MATCH символов, остальные два способа - весь ключ, то есть больше.
+  if (budget <= 0) return [key.slice(0, MIN_PREFIX_MATCH)];
+  const parts = budget + 1;
+  const size = Math.floor(key.length / parts);
+  if (size < 1) return [key];
+  const out = [];
+  for (let i = 0; i < parts; i += 1) {
+    out.push(i === parts - 1 ? key.slice(i * size) : key.slice(i * size, (i + 1) * size));
+  }
+  return out;
+}
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Один регэксп на группу «или»: сообщение обязано содержать зонд хотя бы одной альтернативы. */
+function buildGroupProbe(group, matching) {
+  const probes = new Set();
+  for (const key of group) {
+    if (!key) continue;
+    const budget = matching.typos ? typoBudget(key.length) : 0;
+    const blocks = probeBlocks(key, budget);
+    for (const block of blocks) {
+      if (!block) continue;
+      probes.add(block);
+      if (matching.layout) {
+        const latin = toLatinLayout(block);
+        if (latin) probes.add(latin);
+      }
+    }
+  }
+  if (!probes.size) return null;
+  return new RegExp([...probes].map(escapeRegExp).join('|'));
+}
+
+/**
+ * Дешёвая подготовка сообщения для предфильтра: невидимые символы, регистр и «ё» - ровно та
+ * же нормализация, что делает tokenize(), но без разбора на слова.
+ */
+function prescan(text) {
+  const source = String(text || '');
+  let out = source;
+  if (INVISIBLE_CHARS.test(out)) out = out.replace(INVISIBLE_CHARS_ALL, '');
+  out = out.toLowerCase();
+  return out.indexOf('ё') === -1 ? out : out.replace(/ё/g, 'е');
+}
+
+/**
+ * Может ли тема сработать на этом сообщении. Ответ «нет» - окончательный, ответ «да» -
+ * повод разобрать сообщение и проверить как следует.
+ */
+function mayMatch(topic, prescanned) {
+  const normalized = normalizeTopic(topic);
+  if (!normalized.requiredProbes.length) return true;
+  for (const probe of normalized.requiredProbes) {
+    if (probe && !probe.test(prescanned)) return false;
+  }
+  return true;
+}
+
 /** Длина общего префикса двух строк. */
 function commonPrefixLength(a, b) {
   const n = Math.min(a.length, b.length);
@@ -541,6 +642,9 @@ function normalizeTopic(topic) {
     ),
     matching: { ...DEFAULT_MATCHING, ...(topic.matching || {}) },
   };
+  // Зонды предфильтра - по одному регэкспу на группу «или». Считаются здесь, потому что
+  // здесь же тема разбирается один раз на все сообщения (см. кэш в games/autoAnswer.js).
+  out.requiredProbes = out.requiredGroups.map((group) => buildGroupProbe(group, out.matching));
   Object.defineProperty(out, NORMALIZED, { value: true, enumerable: false });
   return out;
 }
@@ -1138,6 +1242,8 @@ module.exports = {
   selectTopic,
   toMatcherTopic,
   describeRequired,
+  prescan,
+  mayMatch,
   deriveKeywords,
   deriveExclusions,
   checkRule,
