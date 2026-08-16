@@ -662,6 +662,7 @@ function groupStems(stems) {
  */
 function deriveKeywords(examples, opts = {}) {
   const wordFrequency = opts.wordFrequency || new Map();
+  const isEmote = opts.isEmote || (() => false);
   const texts = (examples || []).map((e) => String(e || '').trim()).filter(Boolean);
 
   if (!texts.length) {
@@ -680,6 +681,7 @@ function deriveKeywords(examples, opts = {}) {
       const s = token.stem;
       if (!s || s.length < MIN_KEYWORD_LENGTH) continue;
       if (token.isMention) continue;          // «@mistercop» - адресат, а не тема
+      if (isEmote(token.norm)) continue;      // эмоут - не слово темы
       if (!/\p{L}/u.test(s)) continue;       // «2026» ключевым словом не станет
       if (NON_KEYWORD_STEMS.has(s)) continue; // вопросительные слова и стоп-слова
       stems.add(s);
@@ -774,6 +776,145 @@ function deriveKeywords(examples, opts = {}) {
 }
 
 /**
+ * Вывести ИСКЛЮЧАЮЩИЕ слова из помеченных ложных срабатываний. Зеркало deriveKeywords().
+ *
+ * Кандидат - слово, которое есть в помеченных сообщениях и которого нет НИ В ОДНОМ настоящем
+ * примере: если слово встречается и там и там, исключение по нему убьёт правило вместе с
+ * мусором. Уже заданные ключевые слова темы исключаются из кандидатов по той же причине.
+ *
+ * Отбор - ЖАДНОЕ ПОКРЫТИЕ, а не «топ-N по частоте». Разница принципиальная: частотный список
+ * выдаёт пять синонимов одной и той же мысли и не трогает остальные пять сообщений, тогда как
+ * покрытие на каждом шаге берёт слово, закрывающее больше всего ещё не закрытых. На живых
+ * данных #mistercop ложные срабатывания оказались почти сплошь про ИЗМЕНЕНИЕ фильтра
+ * («а ты фильтр обновлял?», «тебе поменять фильтр?», «хочу заменить звук»), и покрытие
+ * находит эти глаголы, а не случайные «привет» и «господа».
+ *
+ * При равном покрытии берётся слово, которое РЕЖЕ встречается в чате канала: у частого слова
+ * больше побочного урона по настоящим вопросам, которых в размеченной выборке ещё нет.
+ *
+ * Каждое слово возвращается вместе с числом закрытых им сообщений, а те, что закрыть не
+ * удалось, возвращаются отдельно - для них исключающего слова просто нет, и модератор должен
+ * увидеть это, а не думать, что список полон.
+ *
+ * @param {string[]} examples - настоящие примеры вопроса (их правило ловить обязано)
+ * @param {string[]} antiExamples - помеченные ложные срабатывания
+ * @param {{wordFrequency?: Map<string, number>, keywords?: string[], limit?: number}} [opts]
+ */
+function deriveExclusions(examples, antiExamples, opts = {}) {
+  const wordFrequency = opts.wordFrequency || new Map();
+  const isEmote = opts.isEmote || (() => false);
+  const limit = opts.limit || 8;
+
+  const positives = (examples || []).map((t) => String(t || '').trim()).filter(Boolean);
+  const negatives = (antiExamples || []).map((t) => String(t || '').trim()).filter(Boolean);
+  if (!negatives.length) return { exclusions: [], uncovered: [], warning: 'нет помеченных сообщений' };
+
+  // Канон строится по ОБОИМ наборам сразу, иначе «лутфильтр» из помеченных и «фильтр» из
+  // примеров окажутся разными словами и защита «не трогать слова примеров» не сработает.
+  const rawSurfaces = new Map();
+  const collect = (text) => {
+    const stems = new Map();
+    for (const token of analyzeMessage(text).tokens) {
+      const s = token.stem;
+      if (!s || s.length < MIN_KEYWORD_LENGTH) continue;
+      if (token.isMention) continue;
+      // Эмоуты в исключающие слова не годятся: «eeeh» или «Susge» заблокировали бы тему на
+      // любом сообщении с этим эмоутом независимо от смысла. На живой выборке они вдобавок
+      // съедали половину мест в списке, оставляя настоящие сообщения незакрытыми.
+      if (isEmote(token.norm)) continue;
+      if (!/\p{L}/u.test(s)) continue;
+      if (NON_KEYWORD_STEMS.has(s)) continue;
+      stems.set(s, token.norm);
+      if (!rawSurfaces.has(s)) rawSurfaces.set(s, new Map());
+      const counts = rawSurfaces.get(s);
+      counts.set(token.norm, (counts.get(token.norm) || 0) + 1);
+    }
+    return stems;
+  };
+
+  const positiveRaw = positives.map(collect);
+  const negativeRaw = negatives.map(collect);
+  const canonical = groupStems(rawSurfaces.keys());
+  const canon = (s) => canonical.get(s) || s;
+
+  const banned = new Set();
+  for (const stems of positiveRaw) for (const s of stems.keys()) banned.add(canon(s));
+  for (const word of opts.keywords || []) banned.add(canon(stem(String(word))));
+
+  const negativeSets = negativeRaw.map((stems) => {
+    const out = new Set();
+    for (const s of stems.keys()) {
+      const key = canon(s);
+      if (!banned.has(key)) out.add(key);
+    }
+    return out;
+  });
+
+  const label = (s) => {
+    let best = null;
+    let bestCount = -1;
+    for (const [raw, target] of canonical) {
+      if (target !== s) continue;
+      for (const [word, count] of rawSurfaces.get(raw) || []) {
+        if (stem(word) !== s) continue;
+        if (count > bestCount) { best = word; bestCount = count; }
+      }
+    }
+    return best || s;
+  };
+
+  const rarity = (s) => wordFrequency.get(s) ?? Number.POSITIVE_INFINITY;
+
+  const exclusions = [];
+  const uncoveredIdx = new Set(negativeSets.map((_, i) => i));
+
+  while (exclusions.length < limit && uncoveredIdx.size) {
+    const coverage = new Map();
+    for (const i of uncoveredIdx) {
+      for (const s of negativeSets[i]) coverage.set(s, (coverage.get(s) || 0) + 1);
+    }
+    if (!coverage.size) break;
+
+    let pick = null;
+    for (const [s, count] of coverage) {
+      if (
+        !pick ||
+        count > pick.count ||
+        (count === pick.count && rarity(s) < rarity(pick.stem)) ||
+        (count === pick.count && rarity(s) === rarity(pick.stem) && s < pick.stem)
+      ) {
+        pick = { stem: s, count };
+      }
+    }
+
+    exclusions.push({
+      stem: pick.stem,
+      label: label(pick.stem),
+      covers: pick.count,
+      channelCount: wordFrequency.has(pick.stem) ? wordFrequency.get(pick.stem) : null,
+    });
+    for (const i of [...uncoveredIdx]) {
+      if (negativeSets[i].has(pick.stem)) uncoveredIdx.delete(i);
+    }
+  }
+
+  const uncovered = [...uncoveredIdx].map((i) => ({
+    text: negatives[i],
+    // Пустое множество означает, что в сообщении вообще нет слов, которых не было бы в
+    // примерах - исключающего слова для него не существует, правило придётся сужать иначе.
+    reason: negativeSets[i].size ? 'не хватило места в списке' : 'все его слова есть в примерах',
+  }));
+
+  return {
+    exclusions,
+    uncovered,
+    warning: uncovered.length
+      ? `${uncovered.length} из ${negatives.length} закрыть не удалось`
+      : null,
+  };
+}
+
+/**
  * Проверить правило по примерам и антипримерам.
  *
  * Это то, что стоит за кнопкой «не то» на странице контроля: модератор помечает ложное
@@ -821,6 +962,7 @@ module.exports = {
   selectTopic,
   toMatcherTopic,
   deriveKeywords,
+  deriveExclusions,
   checkRule,
   normalizeTopic,
   // экспортируется для тестов и для предпросмотра на сайте
