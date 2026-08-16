@@ -23,6 +23,7 @@ async function bootstrap() {
   const longBanScheduler = require('./twitch/longBanScheduler.js');
   const unbanRequestScheduler = require('./twitch/unbanRequestScheduler.js');
   const diskUsageScheduler = require('./twitch/diskUsageScheduler.js');
+  const memoryUsageScheduler = require('./twitch/memoryUsageScheduler.js');
   const unbanVote = require('./games/unbanVote.js');
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
@@ -277,6 +278,10 @@ async function bootstrap() {
     // diskUsageScheduler.js. Doesn't need the client; started here just to keep every
     // background scheduler's startup call in one place.
     diskUsageScheduler.start();
+    // The same idea for RAM, at a much finer cadence - the VPS has no swap, so memory pressure is
+    // resolved by the OOM killer rather than by slowdown and an hourly point sample would miss the
+    // spike entirely. See memoryUsageScheduler.js.
+    memoryUsageScheduler.start();
   }
 
   await start();
