@@ -472,9 +472,23 @@ function findToken(keyStem, tokens, matching, skipTokens = null) {
   return null;
 }
 
-/** Нормализация темы: значения по умолчанию в одном месте. */
+// Метка «эта тема уже нормализована». Неперечисляемая, поэтому не попадает ни в JSON, ни в
+// spread - а значит `{...topic, requireQuestion: false}` честно нормализуется заново.
+const NORMALIZED = Symbol('normalizedTopic');
+
+/**
+ * Нормализация темы: значения по умолчанию в одном месте.
+ *
+ * ИДЕМПОТЕНТНА, и это не украшение. Во-первых, повторный проход по собственному результату
+ * ломался бы молча: `requiredStems` там уже превратились в `requiredGroups`, и тема с
+ * обязательными словами стала бы темой без единого обязательного слова, то есть перестала
+ * бы срабатывать вовсе. Во-вторых, на этом держится кэш: разбор правила стоит одного
+ * стеммирования каждого слова, а зовётся он из matchTopic - то есть на каждом сообщении
+ * чата. На теме из 54 слов это 113 мкс на сообщение против 3 мкс с готовой темой.
+ */
 function normalizeTopic(topic) {
-  return {
+  if (topic && topic[NORMALIZED]) return topic;
+  const out = {
     id: topic.id || topic._id || null,
     title: topic.title || '',
     // Обязательные слова - это ГРУППЫ. Внутри группы «или», между группами «и»:
@@ -488,11 +502,13 @@ function normalizeTopic(topic) {
     // Это единственный способ выразить границу, по которой у канала идут ошибки: «где его
     // ВЗЯТЬ» против «что с ним НЕ ТАК». Исключающими словами она не выражается - там пришлось
     // бы перечислить все способы сказать «не так», а их бесконечно много.
-    requiredGroups: (topic.requiredStems || [])
+    // Принимается и человеческая форма («фильтр», «где|взять»), и уже разобранная - копия
+    // разобранной темы через spread метку теряет, и без этого её обязательные слова просто
+    // исчезли бы: `requiredStems` в ней уже нет, а `requiredGroups` старый разбор не читал.
+    requiredGroups: (topic.requiredStems || topic.requiredGroups || [])
       .map((entry) =>
-        String(entry)
-          .split('|')
-          .map((word) => stem(word.trim()))
+        (Array.isArray(entry) ? entry : String(entry).split('|'))
+          .map((word) => stem(String(word).trim()))
           .filter(Boolean),
       )
       .filter((group) => group.length),
@@ -521,10 +537,12 @@ function normalizeTopic(topic) {
     // @vlad_261 где взять фильтр?» адресовано в том числе стримеру и ответа заслуживает.
     silentOnThirdPartyMention: topic.silentOnThirdPartyMention !== false,
     ownLogins: new Set(
-      (topic.ownLogins || []).map((l) => String(l).replace(/^#/, '').toLowerCase()).filter(Boolean),
+      [...(topic.ownLogins || [])].map((l) => String(l).replace(/^#/, '').toLowerCase()).filter(Boolean),
     ),
     matching: { ...DEFAULT_MATCHING, ...(topic.matching || {}) },
   };
+  Object.defineProperty(out, NORMALIZED, { value: true, enumerable: false });
+  return out;
 }
 
 /**

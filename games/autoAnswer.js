@@ -27,6 +27,25 @@ const botInitInfo = require('../botInitInfo.js');
 // '#channel:<topicId>' -> timestamp последнего срабатывания (кулдаун)
 const lastFired = new Map();
 
+// Разобранные правила тем. Ключ - сам массив тем из кэша репозитория: он ЗАМЕНЯЕТСЯ целиком
+// на каждом обновлении (db/autoAnswersRepo.js меняет карту, а не правит по месту), поэтому
+// смена его идентичности и есть признак «правило поменялось». WeakMap, чтобы старый разбор
+// уходил вместе со старым массивом.
+//
+// Без этого кэша разбор правила шёл заново на КАЖДОМ сообщении чата: normalizeTopic
+// стеммирует каждое слово темы, и на теме из 54 слов это 113 мкс на сообщение против 3 мкс
+// с готовой темой - больше, чем стоит вся остальная обработка сообщения вместе взятая.
+const parsedTopics = new WeakMap();
+
+function matcherTopics(docs, ownLogins) {
+  let parsed = parsedTopics.get(docs);
+  if (!parsed) {
+    parsed = docs.map((doc) => matcher.normalizeTopic(matcher.toMatcherTopic(doc, { ownLogins })));
+    parsedTopics.set(docs, parsed);
+  }
+  return parsed;
+}
+
 function cooldownKey(channel, topic) {
   return `${channel}:${topic._id}`;
 }
@@ -47,7 +66,7 @@ function handle(client, channel, userState, message) {
   // Чьи «@упоминания» тема считает своими: сам канал и бот. Всё остальное - разговор
   // зрителей между собой, и тема на него по умолчанию молчит (см. normalizeTopic).
   const ownLogins = [channel, botInitInfo.settings.username].filter(Boolean);
-  const best = matcher.selectTopic(analysis, docs.map((d) => matcher.toMatcherTopic(d, { ownLogins })));
+  const best = matcher.selectTopic(analysis, matcherTopics(docs, ownLogins));
   if (!best) return 0;
 
   const topic = docs[best.index];
