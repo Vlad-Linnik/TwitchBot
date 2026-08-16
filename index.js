@@ -25,6 +25,8 @@ async function bootstrap() {
   const diskUsageScheduler = require('./twitch/diskUsageScheduler.js');
   const memoryUsageScheduler = require('./twitch/memoryUsageScheduler.js');
   const unbanVote = require('./games/unbanVote.js');
+  const autoAnswer = require('./games/autoAnswer.js');
+  const autoAnswersRepo = require('./db/autoAnswersRepo.js');
   const botHeartbeatRepo = require('./db/botHeartbeatRepo.js');
   const errorRingBuffer = require('./shared/errorRingBuffer.js');
   const healthTracker = require('./shared/healthTracker.js');
@@ -229,6 +231,14 @@ async function bootstrap() {
         }
       }
 
+      // Auto-answers: a topic a moderator authored on the site. MUST come before
+      // randomEventsAndThings - games/questionToThisBot.js in there fires on any "?" with a
+      // random yes/no, so on "какой фильтр?" the chat would get a joke instead of the real
+      // answer somebody wrote for exactly that question. See games/autoAnswer.js.
+      if (autoAnswer.handle(client, channel, userState, message)) {
+        return;
+      }
+
       //radom things
       msgHandle.randomEventsAndThings(client, channel, userState, message);
     } catch (err) {
@@ -282,6 +292,12 @@ async function bootstrap() {
     // resolved by the OOM killer rather than by slowdown and an hourly point sample would miss the
     // spike entirely. See memoryUsageScheduler.js.
     memoryUsageScheduler.start();
+
+    // Re-reads auto-answer topics from the site every 10s (same cadence as custom commands),
+    // so a topic switched to "боевая" on the panel goes live without a restart. Until the
+    // first read lands the cache is empty, which simply means "no topics" - silence is this
+    // feature's default, so an empty cache can never misfire. See db/autoAnswersRepo.js.
+    autoAnswersRepo.startRefreshLoop(Object.keys(botInitInfo.channels).map((c) => `#${c}`));
   }
 
   await start();
