@@ -21,6 +21,7 @@
 // не «что бы примерно случилось», а что случилось, с точностью до последнего шага.
 const matcher = require('../shared/autoAnswerMatch.js');
 const autoAnswersRepo = require('../db/autoAnswersRepo.js');
+const { isMod } = require('../shared/isMod.js');
 
 // '#channel:<topicId>' -> timestamp последнего срабатывания (кулдаун)
 const lastFired = new Map();
@@ -46,6 +47,16 @@ function handle(client, channel, userState, message) {
   if (!best) return 0;
 
   const topic = docs[best.index];
+
+  // Модератор и стример - не та аудитория. Автоответ существует для зрителя, который не
+  // прочитал готовый ответ на экране; модератор про этот ответ знает, он его и написал.
+  // На живых логах #mistercop заметная часть ложных срабатываний оказалась перепиской
+  // модераторов со стримером о состоянии фильтра («нужно что-то в фильтре поменять?»), и
+  // словами она от настоящих вопросов не отличается - зато отличается тем, КТО спросил.
+  //
+  // Не записывается даже в журнал: это не «тема сработала и была подавлена», это сообщение,
+  // которое фича не рассматривает вовсе, и строка о нём засоряла бы ленту разметки.
+  if (topic.skipModerators !== false && isMod(userState)) return 0;
   const record = (sent, skipReason) =>
     autoAnswersRepo.recordHit({
       channel,

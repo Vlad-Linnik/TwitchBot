@@ -428,7 +428,25 @@ function normalizeTopic(topic) {
   return {
     id: topic.id || topic._id || null,
     title: topic.title || '',
-    requiredStems: (topic.requiredStems || []).map((s) => stem(String(s))).filter(Boolean),
+    // Обязательные слова - это ГРУППЫ. Внутри группы «или», между группами «и»:
+    //
+    //     фильтр, где|взять|скачать|ссылка   ->   фильтр И (где ИЛИ взять ИЛИ скачать ИЛИ ссылка)
+    //
+    // Форма хранения не менялась (массив строк), альтернативы разделяются «|» внутри
+    // элемента - поэтому старая тема с ['фильтр','ссф'] читается как две группы по одному
+    // слову и ведёт себя ровно как раньше.
+    //
+    // Это единственный способ выразить границу, по которой у канала идут ошибки: «где его
+    // ВЗЯТЬ» против «что с ним НЕ ТАК». Исключающими словами она не выражается - там пришлось
+    // бы перечислить все способы сказать «не так», а их бесконечно много.
+    requiredGroups: (topic.requiredStems || [])
+      .map((entry) =>
+        String(entry)
+          .split('|')
+          .map((word) => stem(word.trim()))
+          .filter(Boolean),
+      )
+      .filter((group) => group.length),
     optionalStems: (topic.optionalStems || []).map((s) => stem(String(s))).filter(Boolean),
     excludeStems: (topic.excludeStems || []).map((s) => stem(String(s))).filter(Boolean),
     // Второй ярус доводов «против»: встроенные веса можно перевесить, но иногда модератор
@@ -467,6 +485,20 @@ function toMatcherTopic(doc) {
 }
 
 /**
+ * Разобрать группы обязательных слов в человекочитаемый вид - для интерфейса и отчётов.
+ * ['фильтр', 'где|взять'] -> 'фильтр И (где ИЛИ взять)'
+ */
+function describeRequired(requiredWords) {
+  return (requiredWords || [])
+    .map((entry) => {
+      const parts = String(entry).split('|').map((s) => s.trim()).filter(Boolean);
+      return parts.length > 1 ? `(${parts.join(' ИЛИ ')})` : parts[0];
+    })
+    .filter(Boolean)
+    .join(' И ');
+}
+
+/**
  * Сопоставить разобранное сообщение с одной темой.
  *
  * Всегда возвращает объяснение - и когда совпало, и когда нет. `reason` для несовпадения
@@ -491,7 +523,7 @@ function matchTopic(analysis, rawTopic) {
   if (analysis.isCommand) {
     return { ...base, reason: 'сообщение - вызов команды' };
   }
-  if (!topic.requiredStems.length) {
+  if (!topic.requiredGroups.length) {
     return { ...base, reason: 'у темы нет обязательных слов' };
   }
   if (topic.requireQuestion) {
@@ -513,31 +545,35 @@ function matchTopic(analysis, rawTopic) {
     }
   }
 
-  // Стоп-слова темы проверяются ДО обязательных: если модератор нажал «не то» и слово
-  // попало в исключения, тема обязана молчать независимо от всего остального.
-  for (const ex of topic.excludeStems) {
-    const hit = findToken(ex, tokens, topic.matching);
-    if (hit) {
-      return {
-        ...base,
-        reason: `исключающее слово «${hit.token.raw}»`,
-        blockedBy: { stem: ex, token: hit.token.raw, how: hit.how },
-      };
-    }
-  }
-
+  // ОБЯЗАТЕЛЬНЫЕ СЛОВА ПРОВЕРЯЮТСЯ ПЕРВЫМИ, и это решение про производительность.
+  //
+  // Исход от порядка не зависит: нет обязательного слова или есть исключающее - в обоих
+  // случаях тема молчит. Меняется только текст причины, и «нет обязательного слова» для
+  // постороннего сообщения даже точнее «исключающего слова».
+  //
+  // А вот цена зависит сильно. Обязательных слов у темы единицы, исключающих - десятки
+  // (список растёт с каждой разметкой). Сообщение, в котором ключа темы нет вовсе - а это
+  // 99,9% чата - при обратном порядке прогонялось бы через ВЕСЬ список исключений впустую,
+  // на каждом сообщении каждого канала. Так оно отсеивается на первом же слове.
   const spans = [];
   const matchedRequired = [];
   const missingRequired = [];
 
-  for (const key of topic.requiredStems) {
-    const hit = findToken(key, tokens, topic.matching);
+  for (const group of topic.requiredGroups) {
+    // Внутри группы достаточно любой альтернативы. Порядок перебора - порядок, в котором их
+    // написал модератор, чтобы в отчёте оказалось то слово, о котором он думал первым.
+    let hit = null;
+    let matchedStem = null;
+    for (const alternative of group) {
+      hit = findToken(alternative, tokens, topic.matching);
+      if (hit) { matchedStem = alternative; break; }
+    }
     if (!hit) {
-      missingRequired.push(key);
+      missingRequired.push(group.join('|'));
       continue;
     }
-    matchedRequired.push({ stem: key, token: hit.token.raw, how: hit.how });
-    spans.push({ start: hit.token.start, end: hit.token.end, stem: key, how: hit.how, required: true });
+    matchedRequired.push({ stem: matchedStem, group, token: hit.token.raw, how: hit.how });
+    spans.push({ start: hit.token.start, end: hit.token.end, stem: matchedStem, how: hit.how, required: true });
   }
 
   if (missingRequired.length) {
@@ -547,6 +583,18 @@ function matchTopic(analysis, rawTopic) {
       missingRequired,
       reason: `нет обязательного слова: ${missingRequired.join(', ')}`,
     };
+  }
+
+  // Слово из «не то» перевешивает совпавшие обязательные - тема обязана молчать.
+  for (const ex of topic.excludeStems) {
+    const hit = findToken(ex, tokens, topic.matching);
+    if (hit) {
+      return {
+        ...base,
+        reason: `исключающее слово «${hit.token.raw}»`,
+        blockedBy: { stem: ex, token: hit.token.raw, how: hit.how },
+      };
+    }
   }
 
   const matchedOptional = [];
@@ -968,6 +1016,7 @@ module.exports = {
   matchTopic,
   selectTopic,
   toMatcherTopic,
+  describeRequired,
   deriveKeywords,
   deriveExclusions,
   checkRule,
