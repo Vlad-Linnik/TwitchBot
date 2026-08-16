@@ -27,6 +27,25 @@ const botInitInfo = require('../botInitInfo.js');
 // '#channel:<topicId>' -> timestamp последнего срабатывания (кулдаун)
 const lastFired = new Map();
 
+// Разобранные правила тем. Ключ - сам массив тем из кэша репозитория: он ЗАМЕНЯЕТСЯ целиком
+// на каждом обновлении (db/autoAnswersRepo.js меняет карту, а не правит по месту), поэтому
+// смена его идентичности и есть признак «правило поменялось». WeakMap, чтобы старый разбор
+// уходил вместе со старым массивом.
+//
+// Без этого кэша разбор правила шёл заново на КАЖДОМ сообщении чата: normalizeTopic
+// стеммирует каждое слово темы, и на теме из 54 слов это 113 мкс на сообщение против 3 мкс
+// с готовой темой - больше, чем стоит вся остальная обработка сообщения вместе взятая.
+const parsedTopics = new WeakMap();
+
+function matcherTopics(docs, ownLogins) {
+  let parsed = parsedTopics.get(docs);
+  if (!parsed) {
+    parsed = docs.map((doc) => matcher.normalizeTopic(matcher.toMatcherTopic(doc, { ownLogins })));
+    parsedTopics.set(docs, parsed);
+  }
+  return parsed;
+}
+
 function cooldownKey(channel, topic) {
   return `${channel}:${topic._id}`;
 }
@@ -41,16 +60,31 @@ function handle(client, channel, userState, message) {
   const docs = autoAnswersRepo.getTopics(channel);
   if (!docs.length) return 0;
 
-  const analysis = matcher.analyzeMessage(message);
-  if (analysis.isCommand) return 0;
-
   // Чьи «@упоминания» тема считает своими: сам канал и бот. Всё остальное - разговор
   // зрителей между собой, и тема на него по умолчанию молчит (см. normalizeTopic).
   const ownLogins = [channel, botInitInfo.settings.username].filter(Boolean);
-  const best = matcher.selectTopic(analysis, docs.map((d) => matcher.toMatcherTopic(d, { ownLogins })));
+  const topics = matcherTopics(docs, ownLogins);
+
+  // ДЕШЁВЫЙ ПРЕДФИЛЬТР ПЕРЕД РАЗБОРОМ. Разбор сообщения стоит ~16 мкс (стем каждого слова),
+  // поиск подстроки - 0,05, а ключевое слово темы встречается в единицах сообщений из
+  // тысячи. На истории канала предфильтр пропускает дальше 0,24% чата и не теряет при этом
+  // ни одного настоящего срабатывания - см. shared/autoAnswerMatch.js о том, почему зонды
+  // строятся под все пять способов сравнения, а не по первым буквам ключа.
+  const prescanned = matcher.prescan(message);
+  const candidates = [];
+  for (let i = 0; i < topics.length; i += 1) {
+    if (matcher.mayMatch(topics[i], prescanned)) candidates.push({ topic: topics[i], doc: docs[i] });
+  }
+  if (!candidates.length) return 0;
+
+  const analysis = matcher.analyzeMessage(message);
+  if (analysis.isCommand) return 0;
+
+  const best = matcher.selectTopic(analysis, candidates.map((c) => c.topic));
   if (!best) return 0;
 
-  const topic = docs[best.index];
+  // Индекс - в СПИСКЕ КАНДИДАТОВ, а не в исходном: предфильтр мог выкинуть темы до неё.
+  const topic = candidates[best.index].doc;
 
   // Модератор и стример - не та аудитория. Автоответ существует для зрителя, который не
   // прочитал готовый ответ на экране; модератор про этот ответ знает, он его и написал.
