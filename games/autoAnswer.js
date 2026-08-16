@@ -22,6 +22,7 @@
 const matcher = require('../shared/autoAnswerMatch.js');
 const autoAnswersRepo = require('../db/autoAnswersRepo.js');
 const { isMod } = require('../shared/isMod.js');
+const botInitInfo = require('../botInitInfo.js');
 
 // '#channel:<topicId>' -> timestamp последнего срабатывания (кулдаун)
 const lastFired = new Map();
@@ -43,7 +44,10 @@ function handle(client, channel, userState, message) {
   const analysis = matcher.analyzeMessage(message);
   if (analysis.isCommand) return 0;
 
-  const best = matcher.selectTopic(analysis, docs.map(matcher.toMatcherTopic));
+  // Чьи «@упоминания» тема считает своими: сам канал и бот. Всё остальное - разговор
+  // зрителей между собой, и тема на него по умолчанию молчит (см. normalizeTopic).
+  const ownLogins = [channel, botInitInfo.settings.username].filter(Boolean);
+  const best = matcher.selectTopic(analysis, docs.map((d) => matcher.toMatcherTopic(d, { ownLogins })));
   if (!best) return 0;
 
   const topic = docs[best.index];

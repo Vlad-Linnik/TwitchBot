@@ -46,21 +46,38 @@ const LAYOUT_QWERTY_TO_RU = {
   z: 'я', x: 'ч', c: 'с', v: 'м', b: 'и', n: 'т', m: 'ь',
 };
 
-// Вопросительные слова и глаголы просьбы. Хранятся исходными формами, стеммируются один
-// раз при загрузке: «какой/какая/какие/каким» дают один стем «как», а «подскажи» и
-// «подскажите» - один «подскаж», так что список читается людьми, а сравнение идёт по стемам.
+// Вопросительные слова. Хранятся исходными формами и стеммируются один раз при загрузке:
+// «какой/какая/какие/каким» дают один стем «как», так что список читается людьми, а
+// сравнение идёт по стемам. У глаголов просьбы ниже правило другое - см. там.
 const QUESTION_WORDS = [
   'как', 'какой', 'какая', 'какое', 'какие', 'каким', 'каком', 'какую', 'какого',
   'что', 'чего', 'чем', 'чё', 'чо', 'шо', 'кто', 'кого', 'кому', 'кем',
   'где', 'куда', 'откуда', 'когда', 'почему', 'отчего', 'зачем', 'сколько',
-  'который', 'которая', 'чей', 'чья', 'разве', 'неужели',
+  'чей', 'чья', 'разве', 'неужели',
 ];
 
+// «который/которая» здесь БЫЛО и убрано: в чате это относительное местоимение, а не
+// вопрос («т5 хуйня, КОТОРАЯ скрыта во всех фильтрах» проходило гейт ровно на этих +2),
+// а на канале #mistercop одна «которая» встречается 1186 раз. Вопросительное «который
+// час» в чате не пишут.
+
+// Глаголы просьбы. Сравниваются ПО ФОРМЕ СЛОВА, а не по стему, и это принципиально:
+// Snowball сводит «дайте» к «да», поэтому стемовый список считал просьбой обычное «да»
+// (52 338 сообщений канала), «дают», «дал», «данном», а через раскладку - ещё и «lf».
+// Стемовые же «скинь» -> «скин» и «кинь» -> «кин» подбирали «скины» и «кино».
+// Список читается людьми, так что перечислить формы дешевле, чем чинить стеммер, и
+// разбор остаётся объяснимым. Раскладка здесь тоже не проверяется - «gjlcrf;bnt» никто
+// не пишет, а «lf» стоило 582 ложных срабатываний.
 const ASKING_VERBS = [
-  'подскажи', 'подскажите', 'подсказать', 'скажи', 'скажите',
-  'посоветуй', 'посоветуйте', 'посоветовать', 'объясни', 'объясните',
-  'напомни', 'напомните', 'помоги', 'помогите',
-  'кинь', 'киньте', 'скинь', 'скиньте', 'дайте',
+  'подскажи', 'подскажите', 'подскажешь', 'подскажете', 'подсказать',
+  'скажи', 'скажите',
+  'посоветуй', 'посоветуйте', 'посоветуешь', 'посоветовать',
+  'объясни', 'объясните', 'объяснить',
+  'напомни', 'напомните', 'напомнить',
+  'помоги', 'помогите',
+  'кинь', 'киньте', 'кинешь',
+  'скинь', 'скиньте', 'скинешь',
+  'дай', 'дайте', 'дашь',
 ];
 
 // Второе лицо. В выборке реальных вопросов («используешь», «у тебя», «порекомендуешь»,
@@ -71,7 +88,7 @@ const SECOND_PERSON_WORDS = ['ты', 'тебя', 'тебе', 'твой', 'тво
 const SECOND_PERSON_ENDING = /(ешь|ишь|ёшь)$/;
 
 const QUESTION_STEMS = new Set(QUESTION_WORDS.map(stem));
-const ASKING_STEMS = new Set(ASKING_VERBS.map(stem));
+const ASKING_FORMS = new Set(ASKING_VERBS);
 const SECOND_PERSON_STEMS = new Set(SECOND_PERSON_WORDS.map(stem));
 
 // Слова, которые никогда не станут ключевыми при автовыводе: они есть почти в любом
@@ -79,7 +96,9 @@ const SECOND_PERSON_STEMS = new Set(SECOND_PERSON_WORDS.map(stem));
 const NON_KEYWORD_STEMS = new Set([
   ...[...STOPWORDS].map(stem),
   ...QUESTION_STEMS,
-  ...ASKING_STEMS,
+  // Здесь нужны именно стемы: кандидатом в ключевые слова не должна стать ни одна форма
+  // глагола просьбы, а не только перечисленные в ASKING_VERBS.
+  ...ASKING_VERBS.map(stem),
   ...SECOND_PERSON_STEMS,
 ]);
 
@@ -88,6 +107,14 @@ const NON_KEYWORD_STEMS = new Set([
 // Пять - потому что «ставка» -> «ставк» и «ставить» -> «став» дают общий префикс 4 и
 // СКЛЕИВАТЬСЯ НЕ ДОЛЖНЫ; порог 4 их бы склеил.
 const MIN_PREFIX_MATCH = 5;
+
+// ...и настолько же коротким должен быть расходящийся хвост с КАЖДОЙ стороны. Общий
+// префикс - подпись одного слова, дожатого стеммером по-разному («использова»/«используеш»,
+// хвосты «ова» и «уеш»), а не разрешение считать одним словом всё, что одинаково
+// начинается. Без этого ограничения ключ «фильтр» ловил «фильтерблейде» (хвосты «р» и
+// «ерблейде»), то есть тему про лут-фильтр подставляло под вопросы о стороннем сайте.
+// Три - потому что настоящие опечатки ключа («фильтер», «фильторм») укладываются в них.
+const MAX_PREFIX_TAIL = 3;
 
 // Ключ короче этого внутрь составного слова не ищется: «бан» нашёлся бы в «банан».
 const MIN_SUBSTRING_KEY = 5;
@@ -147,6 +174,11 @@ const IMPERATIVE_SINGULAR = new Set([
 
 const ASSERTION_WORDS = ['же', 'ведь', 'вроде', 'походу', 'кстати', 'имхо', 'короче', 'типа'];
 const ASSERTION_STEMS = new Set(ASSERTION_WORDS.map(stem));
+
+// Логины из «@упоминаний». Берутся из исходной строки, а не из токенов: токенизатор режет
+// слово по подчёркиванию, и «@vlad_261» дал бы «vlad» - для сравнения с логином канала
+// этого мало. Границы длины - те же, что у Twitch (4..25), с запасом вниз на опечатки.
+const MENTION_PATTERN = /@([a-zA-Z0-9_]{3,25})/g;
 
 const LAUGH_PATTERN = /^(а?ха+х?[аох]*|лол|кек|кекв|ржу|лмао|xd+)$/;
 const JOKE_TAIL_PATTERN = /\)\)/;
@@ -276,7 +308,7 @@ function detectQuestion(text, tokens) {
   if (hasMark) add(QUESTION_WEIGHTS.mark, 'знак вопроса');
 
   // --- доводы за ------------------------------------------------------------------------
-  const asking = tokens.find((t) => t.variants.some((v) => ASKING_STEMS.has(v)));
+  const asking = tokens.find((t) => ASKING_FORMS.has(t.norm));
   if (asking) add(QUESTION_WEIGHTS.askingVerb, `просьба «${asking.raw}»`);
 
   // Вопросительное слово дальше третьего места почти всегда союз, а не вопрос: на живых
@@ -312,7 +344,7 @@ function detectQuestion(text, tokens) {
   if (causal) add(QUESTION_WEIGHTS.causal, `объяснение «${causal[2].trim()}»`);
 
   const imperative = tokens.find((t) => {
-    if (t.variants.some((v) => ASKING_STEMS.has(v))) return false; // «подскажите» - это просьба
+    if (ASKING_FORMS.has(t.norm)) return false; // «подскажите» - это просьба
     if (IMPERATIVE_SINGULAR.has(t.norm)) return true;
     if (t.norm.length >= 5 && IMPERATIVE_PLURAL_ENDING.test(t.norm)) return true;
     return t.norm.length >= 6 && IMPERATIVE_PLURAL_ITE.test(t.norm);
@@ -348,9 +380,20 @@ function analyzeMessage(text) {
   return {
     text: source,
     tokens,
+    mentions: extractMentions(source),
     isCommand: isCommandMessage(source),
     question: detectQuestion(source, tokens),
   };
+}
+
+/** Логины из «@упоминаний», в нижнем регистре, в порядке появления, без повторов. */
+function extractMentions(text) {
+  const out = [];
+  for (const m of String(text).matchAll(MENTION_PATTERN)) {
+    const login = m[1].toLowerCase();
+    if (!out.includes(login)) out.push(login);
+  }
+  return out;
 }
 
 /** Длина общего префикса двух строк. */
@@ -366,8 +409,12 @@ function commonPrefixLength(a, b) {
  *
  * Способы проверяются в порядке убывания надёжности и первый сработавший выигрывает,
  * чтобы в отчёте оказалась самая сильная причина, а не случайная.
+ *
+ * `skipTokens` - токены, которые этот поиск обязан пропустить (см. проверку исключающих
+ * слов в `matchTopic`). Пропускается именно токен, а не весь поиск: в «где взять фильтр
+ * для фильтерблейда» исключение обязано сработать на втором слове.
  */
-function findToken(keyStem, tokens, matching) {
+function findToken(keyStem, tokens, matching, skipTokens = null) {
   const budget = matching.typos ? typoBudget(keyStem.length) : 0;
 
   const passes = [
@@ -392,7 +439,8 @@ function findToken(keyStem, tokens, matching) {
         if (v.length < MIN_PREFIX_MATCH) return false;
         const common = commonPrefixLength(v, keyStem);
         if (common < MIN_PREFIX_MATCH) return false;
-        return common < v.length && common < keyStem.length;
+        if (common >= v.length || common >= keyStem.length) return false;
+        return v.length - common <= MAX_PREFIX_TAIL && keyStem.length - common <= MAX_PREFIX_TAIL;
       }) ? 'по началу слова' : null;
     },
     // 3. Ключ как ХВОСТ составного слова: «лутфильтр» - это фильтр, «фильтрация» - нет.
@@ -416,6 +464,7 @@ function findToken(keyStem, tokens, matching) {
 
   for (const check of passes) {
     for (const token of tokens) {
+      if (skipTokens && skipTokens.has(token)) continue;
       const how = check(token);
       if (how) return { token, how };
     }
@@ -454,6 +503,26 @@ function normalizeTopic(topic) {
     // а не вес: оно снимает вопросительную форму независимо от суммы.
     notQuestionStems: (topic.notQuestionStems || []).map((s) => stem(String(s))).filter(Boolean),
     requireQuestion: topic.requireQuestion !== false,
+    // Насколько уверенно сообщение должно выглядеть вопросом. Двойка - историческое
+    // значение и разумная середина; поднимать имеет смысл теме, для которой лишний ответ
+    // дороже пропущенного вопроса. Тройка на живой выборке означает примерно «нужен знак
+    // вопроса или глагол просьбы»: она убрала оба последних ложных срабатывания темы про
+    // лут-фильтр ценой одного настоящего вопроса без «?» («Чач где фильтр копа взять»).
+    // Выше пяти тема практически замолкает - там уже нужны два сильных признака сразу.
+    questionThreshold: Number.isFinite(topic.questionThreshold) && topic.questionThreshold > 0
+      ? topic.questionThreshold
+      : QUESTION_SCORE_THRESHOLD,
+    // Сообщение, адресованное другому ЗРИТЕЛЮ, - это не вопрос каналу, и словами оно от
+    // вопроса каналу не отличается: «@AgroMorph Дай лутфильтр молю» слово в слово просьба
+    // дать фильтр, но ответ ссылкой на фильтр стримера тут прямо неверен. На размеченной
+    // выборке #mistercop признак разошёлся 13 к 1 в пользу «молчать».
+    //
+    // Условие именно «упоминания есть, и НИ ОДНО из них не канальное»: «@mistercop
+    // @vlad_261 где взять фильтр?» адресовано в том числе стримеру и ответа заслуживает.
+    silentOnThirdPartyMention: topic.silentOnThirdPartyMention !== false,
+    ownLogins: new Set(
+      (topic.ownLogins || []).map((l) => String(l).replace(/^#/, '').toLowerCase()).filter(Boolean),
+    ),
     matching: { ...DEFAULT_MATCHING, ...(topic.matching || {}) },
   };
 }
@@ -470,7 +539,7 @@ function normalizeTopic(topic) {
  * пишет, бот читает, и разъехавшийся переходник означал бы, что бот исполняет не то правило,
  * которое настроили на сайте.
  */
-function toMatcherTopic(doc) {
+function toMatcherTopic(doc, opts = {}) {
   if (!doc) return null;
   return {
     id: doc._id ? String(doc._id) : (doc.id || null),
@@ -480,6 +549,11 @@ function toMatcherTopic(doc) {
     excludeStems: doc.excludeWords || [],
     notQuestionStems: doc.notQuestionWords || [],
     requireQuestion: doc.requireQuestion !== false,
+    questionThreshold: doc.questionThreshold,
+    silentOnThirdPartyMention: doc.silentOnThirdPartyMention !== false,
+    // Чьи упоминания считаются «своими»: логин канала и логин бота. Это данные канала, а
+    // не темы, поэтому приходят от вызывающего, а не из документа.
+    ownLogins: opts.ownLogins || [],
     matching: doc.matching || undefined,
   };
 }
@@ -534,12 +608,12 @@ function matchTopic(analysis, rawTopic) {
         return { ...base, reason: `слово «${hit.token.raw}» помечено как «это не вопрос»` };
       }
     }
-    if (!analysis.question.isQuestion) {
+    if (analysis.question.score < topic.questionThreshold) {
       const against = analysis.question.signals.filter((s) => s.weight < 0).map((s) => s.label);
       return {
         ...base,
         reason: 'не похоже на вопрос' +
-          ` (${analysis.question.score} из ${analysis.question.threshold}` +
+          ` (${analysis.question.score} из ${topic.questionThreshold}` +
           `${against.length ? '; против: ' + against.join(', ') : ''})`,
       };
     }
@@ -558,6 +632,8 @@ function matchTopic(analysis, rawTopic) {
   const spans = [];
   const matchedRequired = [];
   const missingRequired = [];
+  // Токены, на которых держится тема. Исключающему слову они недоступны - см. ниже.
+  const requiredTokens = new Set();
 
   for (const group of topic.requiredGroups) {
     // Внутри группы достаточно любой альтернативы. Порядок перебора - порядок, в котором их
@@ -574,6 +650,7 @@ function matchTopic(analysis, rawTopic) {
     }
     matchedRequired.push({ stem: matchedStem, group, token: hit.token.raw, how: hit.how });
     spans.push({ start: hit.token.start, end: hit.token.end, stem: matchedStem, how: hit.how, required: true });
+    requiredTokens.add(hit.token);
   }
 
   if (missingRequired.length) {
@@ -585,9 +662,35 @@ function matchTopic(analysis, rawTopic) {
     };
   }
 
+  // Адресат сообщения. Проверяется после обязательных слов по той же причине, по которой
+  // они идут первыми: чат, в котором ключа темы нет, сюда не доходит вовсе.
+  //
+  // Пустой ownLogins ОТКЛЮЧАЕТ правило, а не ужесточает его. Без логина канала «чужой» от
+  // «своего» не отличить, и молчать на каждом «@» значило бы выдавать незнание за
+  // осторожность: тема почти переставала бы работать, причём из-за забытого параметра, а не
+  // по решению модератора. Живые вызовы (бот, прогон по логам, проверка правила примерами)
+  // логины передают всегда.
+  if (topic.silentOnThirdPartyMention && topic.ownLogins.size && analysis.mentions.length
+      && !analysis.mentions.some((login) => topic.ownLogins.has(login))) {
+    return {
+      ...base,
+      matchedRequired,
+      reason: `сообщение адресовано другому зрителю («@${analysis.mentions[0]}»)`,
+      addressedTo: analysis.mentions[0],
+    };
+  }
+
   // Слово из «не то» перевешивает совпавшие обязательные - тема обязана молчать.
+  //
+  // Но НЕ на том самом слове, ради которого тема заведена. Нестрогие способы сравнения
+  // работают в обе стороны, и это ловушка: ключ «фильтр» токен «фильтерблейде» не ловит
+  // (правило 3 требует ключ хвостом составного), а исключение «фильтерблейд» ловит токен
+  // «фильтр» - общий префикс «фильт» = 5, хвосты расходятся. Модератор, добавивший в
+  // исключения слово из лога, глушил тему ЦЕЛИКОМ, и страница объясняла это как
+  // «исключающее слово „фильтр“», то есть указывала на ключ самой темы. То же делало любое
+  // слово, стем которого совпадает с ключом («фильтруй» -> «фильтр»).
   for (const ex of topic.excludeStems) {
-    const hit = findToken(ex, tokens, topic.matching);
+    const hit = findToken(ex, tokens, topic.matching, requiredTokens);
     if (hit) {
       return {
         ...base,
@@ -1031,7 +1134,7 @@ module.exports = {
   QUESTION_WEIGHTS,
   QUESTION_SCORE_THRESHOLD,
   QUESTION_STEMS,
-  ASKING_STEMS,
+  ASKING_FORMS,
   NON_KEYWORD_STEMS,
   MIN_PREFIX_MATCH,
   MIN_SUBSTRING_KEY,
