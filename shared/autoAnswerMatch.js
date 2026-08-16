@@ -437,6 +437,32 @@ function normalizeTopic(topic) {
 }
 
 /**
+ * Перевести документ темы из Mongo в форму, которую понимает matchTopic().
+ *
+ * В базе лежат ЧЕЛОВЕЧЕСКИЕ слова («фильтр», «использовать») - ровно те, что модератор видит
+ * на чипах и правит руками. Стеммирует их normalizeTopic() при каждом сопоставлении, поэтому
+ * хранить обрезки стеммера не нужно и вредно: «использова» на чипе выглядит как опечатка, а
+ * при смене версии стеммера сохранённый обрезок протухнет, тогда как слово - нет.
+ *
+ * Живёт здесь, а не в каждом репозитории отдельно, потому что форма документа общая: сайт её
+ * пишет, бот читает, и разъехавшийся переходник означал бы, что бот исполняет не то правило,
+ * которое настроили на сайте.
+ */
+function toMatcherTopic(doc) {
+  if (!doc) return null;
+  return {
+    id: doc._id ? String(doc._id) : (doc.id || null),
+    title: doc.title || '',
+    requiredStems: doc.requiredWords || [],
+    optionalStems: doc.optionalWords || [],
+    excludeStems: doc.excludeWords || [],
+    notQuestionStems: doc.notQuestionWords || [],
+    requireQuestion: doc.requireQuestion !== false,
+    matching: doc.matching || undefined,
+  };
+}
+
+/**
  * Сопоставить разобранное сообщение с одной темой.
  *
  * Всегда возвращает объяснение - и когда совпало, и когда нет. `reason` для несовпадения
@@ -759,6 +785,7 @@ module.exports = {
   analyzeMessage,
   matchTopic,
   selectTopic,
+  toMatcherTopic,
   deriveKeywords,
   checkRule,
   normalizeTopic,
