@@ -201,11 +201,6 @@ async function bootstrap() {
         customCommands.recordChatMessage(channel);
       }
 
-      // Who spoke, for the auto-answer's "let a human answer first" rule. Deliberately before
-      // every early return below, and counting COMMANDS too: a moderator who answered with
-      // `!фильтр` answered just as much as one who typed it out. See games/autoAnswer.js.
-      autoAnswer.noteMessage(channel, userState);
-
       // spam protection
       if (await msgHandle.spam_protection(client, channel, userState, message)) {
         return;
