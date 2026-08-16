@@ -254,10 +254,11 @@ class CustomCommands {
     static REFRESH_INTERVAL_MS = 10 * 1000;
 
     constructor(counter) {
-      // Timer - per-channel (channel -> last manual-trigger timestamp), same convention as every
-      // other cooldown in this codebase (msgHandle.js's lastCountWord/lastTopUsers/etc). This used
-      // to be a single scalar shared across every channel, which meant triggering a custom command
-      // in one channel blocked custom-command triggers in every OTHER channel for the next 10s.
+      // Timer - keyed per "channel commandName" (the CANONICAL name, so a command's aliases share
+      // one cooldown with it rather than each getting a free extra trigger), same convention as
+      // Counter's lastCounterUpdate above. It was per-channel until this, and before that a single
+      // scalar shared across every channel; both meant one command's cooldown silently blocked
+      // unrelated ones - triggering !discord made !youtube unavailable for the next 10s.
       this.customCommandsTimer = 10 * 1000; // 10 sec
       this.lastCustomCommand = new Map();
       //connect counter
@@ -653,7 +654,9 @@ class CustomCommands {
         // (it replaces the channel's single active pin, so a non-mod repeatedly triggering it
         // must not be able to keep changing what's pinned).
         if (cmdData.modOnly && !isMod(userState)) return 1;
-        if (!isTimerReady(this.lastCustomCommand.get(channel) || 0, this.customCommandsTimer)) return 1;
+        // Cooldown is per command, not per channel: two different commands never block each other.
+        var cooldownKey = `${channel} ${cmd}`;
+        if (!isTimerReady(this.lastCustomCommand.get(cooldownKey) || 0, this.customCommandsTimer)) return 1;
         var commandResult = this.substituteCounters(channel, await this.resolveCommandText(channel, cmdData));
         if (cmdData.announce) {
           var broadcasterId = this.getBroadcasterId(channel);
@@ -670,7 +673,7 @@ class CustomCommands {
           // or to the mentioned user via a plain @mention prefix if this was "@user !command".
           await sayMaybeMention(client, channel, mentionTarget, userState["id"], commandResult);
         }
-        this.lastCustomCommand.set(channel, new Date().getTime());
+        this.lastCustomCommand.set(cooldownKey, new Date().getTime());
         // someone just said it in chat - push the next auto-send a full period out
         // from now instead of letting it fire again shortly after
         this.resetCommandTimer(channel, cmd);
