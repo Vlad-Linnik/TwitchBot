@@ -249,6 +249,10 @@ function tokenize(text) {
       stem: variants[0],
       variants,
       isLayoutVariant: variants.length > 1,
+      // «@mistercop» - это адресат, а не тема. Сопоставление такой токен по-прежнему видит
+      // (мало ли ключ темы совпал с чьим-то ником), но в кандидаты на ключевое слово он не
+      // идёт: иначе из живых примеров канала в «желательные» уезжает ник стримера.
+      isMention: startCleaned > 0 && cleaned[startCleaned - 1] === '@',
       start: offsets[startCleaned],
       end: offsets[startCleaned + raw.length - 1] + 1,
     });
@@ -606,6 +610,18 @@ function selectTopic(analysis, topics) {
  *
  * Каноном становится самый короткий стем группы: он сильнее обрезан, а значит при
  * сопоставлении по префиксу поймает и всех остальных членов группы.
+ *
+ * ДВА СПОСОБА СКЛЕЙКИ, И ВТОРОЙ ЗДЕСЬ РОВНО ПОТОМУ, ЧТО ОН ЕСТЬ В СОПОСТАВЛЕНИИ.
+ * Первый - общий префикс (недостемминг Snowball). Второй - составное слово: «лутфильтр» это
+ * «фильтр», и findToken() это знает («ключ как хвост слова»). Пока вывод ключевых слов этого
+ * не знал, две половины фичи противоречили друг другу на живых данных: из пяти настоящих
+ * примеров канала четыре говорили «лутфильтр», один - «фильтр», пересечение выходило ПУСТЫМ, и
+ * страница честно отвечала «у примеров нет ни одного общего слова» - хотя тема у них общая, и
+ * бот, получив ключ «фильтр» вручную, поймал бы все пять.
+ *
+ * Канон - КОРОТКИЙ стем: при сопоставлении ключ «фильтр» находит токен «лутфильтр», а обратно
+ * не работает - ключ «лутфильтр» не найдёт «фильтр». Так что из пары всегда выбирается тот,
+ * который ловит обоих.
  */
 function groupStems(stems) {
   const canonical = new Map();
@@ -613,11 +629,15 @@ function groupStems(stems) {
 
   for (const s of ordered) {
     let target = null;
-    if (s.length >= MIN_PREFIX_MATCH) {
-      for (const existing of new Set(canonical.values())) {
-        if (existing.length < MIN_PREFIX_MATCH) continue;
-        if (commonPrefixLength(existing, s) >= MIN_PREFIX_MATCH) { target = existing; break; }
-      }
+    for (const existing of new Set(canonical.values())) {
+      const undersstemmed =
+        s.length >= MIN_PREFIX_MATCH &&
+        existing.length >= MIN_PREFIX_MATCH &&
+        commonPrefixLength(existing, s) >= MIN_PREFIX_MATCH;
+      // Порог длины сам защищает короткие слова: «бан» (3) никогда не станет каноном для
+      // чего-то, что на него заканчивается.
+      const compound = existing.length >= MIN_SUBSTRING_KEY && s.endsWith(existing);
+      if (undersstemmed || compound) { target = existing; break; }
     }
     canonical.set(s, target || s);
   }
@@ -659,6 +679,7 @@ function deriveKeywords(examples, opts = {}) {
     for (const token of tokens) {
       const s = token.stem;
       if (!s || s.length < MIN_KEYWORD_LENGTH) continue;
+      if (token.isMention) continue;          // «@mistercop» - адресат, а не тема
       if (!/\p{L}/u.test(s)) continue;       // «2026» ключевым словом не станет
       if (NON_KEYWORD_STEMS.has(s)) continue; // вопросительные слова и стоп-слова
       stems.add(s);
@@ -692,14 +713,27 @@ function deriveKeywords(examples, opts = {}) {
     for (const s of stems) docFreq.set(s, (docFreq.get(s) || 0) + 1);
   }
 
+  /**
+   * Как назвать ключ на чипе.
+   *
+   * ПОДПИСЬ ОБЯЗАНА СТЕММИРОВАТЬСЯ ОБРАТНО В КАНОН, и это не косметика: на чипе лежит
+   * человеческое слово, и именно оно сохраняется в базу как ключ. Если просто взять самое
+   * частое написание в группе, то из живых примеров канала (четыре «лутфильтр» против одного
+   * «фильтр») ключом станет «лутфильтр» - а он, в отличие от «фильтр», не находит «фильтр».
+   * Правило перестало бы ловить собственный пример, причём молча.
+   */
   const label = (s) => {
     const counts = surfaces.get(s) || new Map();
-    let bestWord = s;
+    let bestWord = null;
     let bestCount = -1;
+    let fallbackWord = s;
+    let fallbackCount = -1;
     for (const [word, count] of counts) {
+      if (count > fallbackCount) { fallbackWord = word; fallbackCount = count; }
+      if (stem(word) !== s) continue;
       if (count > bestCount) { bestWord = word; bestCount = count; }
     }
-    return bestWord;
+    return bestWord || fallbackWord;
   };
 
   const entry = (s) => ({
