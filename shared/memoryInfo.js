@@ -10,10 +10,13 @@
 //   kernel's own estimate of what a new allocation could actually get without swapping, and it is
 //   the number an OOM kill is predicted from. We record both, and everything downstream trends
 //   MemAvailable.
-// - Swap is read explicitly, because on this VPS SwapTotal is 0 and that is not a detail. With no
-//   swap the kernel cannot page anything out under pressure: a spike is answered by the OOM killer
-//   rather than by slowdown, which is why the bot disappears with no crash, no stack trace and
-//   nothing in the log. A panel that can't say "there is no swap" can't explain that.
+// - Swap is read explicitly, because whether it exists at all decides what a shortage looks like.
+//   With no swap the kernel cannot page anything out under pressure: a spike is answered by the OOM
+//   killer rather than by slowdown, so a process disappears with no crash, no stack trace and
+//   nothing in the log. With swap it pages first and the machine slows instead. A panel that can't
+//   tell the two configurations apart can explain neither outcome, so the value is read from the
+//   machine, never assumed — including in a comment, since which one a host is changes without
+//   this file being touched.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
