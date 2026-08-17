@@ -303,7 +303,10 @@ async function weather(client, channel, userState, message) {
     const emojiPart = result.isMoonEmoji ? `фаза луны: ${result.emoji}` : result.emoji;
     const humidityPart = result.humidity !== undefined ? `, влажность ${result.humidity}%` : '';
     const advicePart = result.advice?.length ? ` — ${result.advice.join(' ')}` : '';
-    sayMaybeMention(client, channel, mentionTarget, userState["id"], `Сейчас погода в ${city}: ${result.description} ${emojiPart}, ${result.tempC}°C${humidityPart}${advicePart}`);
+    // result.place is the place the geocoder actually resolved to ("Одесса, Украина"), not the
+    // string that was typed - a same-name hit in another country, or a near-miss on a misspelled
+    // name, is otherwise indistinguishable from the right answer.
+    sayMaybeMention(client, channel, mentionTarget, userState["id"], `Сейчас погода в ${result.place || city}: ${result.description} ${emojiPart}, ${result.tempC}°C${humidityPart}${advicePart}`);
   } catch (err) {
     console.error('[Weather] Failed to fetch weather:', describeError(err));
     sayMaybeMention(client, channel, mentionTarget, userState["id"], `ошибка получения погоды VoHiYo `);
