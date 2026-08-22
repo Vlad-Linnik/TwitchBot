@@ -1024,19 +1024,31 @@ class ChatStats {
     }
   }
 
-  // Distinct senders of an actual chat message in `channel` (with leading `#`) since `sinceDate`.
+  // Distinct senders of an actual chat message in `channel` (with leading `#`) since `sinceDate`,
+  // each with the timestamp of their most recent message in the window.
   // Used by the Бюро амнистии sniper (twitch/unbanRequestScheduler.js, 2-minute window) so its
   // target pool is "who is actually talking right now", not Twitch's Get Chatters list - that list
   // includes silent lurkers with the chat window merely open, which is how the sniper could
-  // previously land on someone who hadn't typed in days. Backed by the existing
+  // previously land on someone who hadn't typed in days. `last_message_at` is what lets that pool
+  // be weighted towards whoever spoke most recently instead of drawn flat. Backed by the existing
   // {channel:1, timestamp:-1, userId:1} index, so this is a covered range scan, not a collection scan.
   async getRecentChatters(channel, sinceDate) {
     await this.ensureInitialized();
     const rows = await this.messagesCollection.aggregate([
       { $match: { channel, timestamp: { $gte: sinceDate } } },
-      { $group: { _id: '$userId', userName: { $last: '$userName' } } },
+      {
+        $group: {
+          _id: '$userId',
+          userName: { $last: '$userName' },
+          lastMessageAt: { $max: '$timestamp' },
+        },
+      },
     ]).toArray();
-    return rows.map(row => ({ user_id: row._id, user_login: row.userName }));
+    return rows.map(row => ({
+      user_id: row._id,
+      user_login: row.userName,
+      last_message_at: row.lastMessageAt,
+    }));
   }
 
   // Which of `userIds` were banned or timed out in `channel` (WITHOUT a leading `#`, the

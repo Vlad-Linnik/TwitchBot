@@ -67,6 +67,30 @@ const MAX_SNIPER_SEC = 3600;
 // Get Chatters list - that list includes silent lurkers with the chat window merely open, which
 // is how the sniper could previously pick someone who hadn't typed in days.
 const SNIPER_ACTIVITY_WINDOW_MS = 2 * 60 * 1000;
+// How much the draw leans on recency. Someone who spoke a moment ago is this many times likelier
+// to be hit than someone whose only message sits at the far edge of the activity window; the odds
+// fall off smoothly (exponentially) in between, so with the 2-minute window above the chance
+// halves roughly every 30 seconds of silence.
+//
+// A flat draw over the window read as arbitrary at the desk: chat sees the shot land on someone
+// whose message has already scrolled away, and the joke lands with it. Weighting keeps the pool
+// intact - the edge of the window still has a real, just small, chance - while putting the shot
+// where chat is actually looking. Nothing hard depends on the exact number.
+const SNIPER_RECENCY_BIAS = 16;
+// The grenade - the desk's second weapon. Instead of drawing one victim it takes everyone who
+// spoke in the last half-minute, which is why its window is its own and much shorter than the
+// rifle's: 30 seconds is about one exchange in a busy chat, so the blast reads as "whoever was
+// talking just now" rather than "whoever was around".
+//
+// It must stay <= SNIPER_ACTIVITY_WINDOW_MS. The pool is built once per channel per tick at the
+// rifle's window and the blast is a subset of it (see fireVolley); a longer window here would
+// silently be truncated to the rifle's instead of reaching further back.
+const GRENADE_BLAST_WINDOW_MS = 30 * 1000;
+// Ceiling on how many people one grenade can take. An unbounded blast is not a joke mechanic: in a
+// channel where fifty people speak every half-minute it is a mass ban issued by one click, and the
+// moderator who threw it cannot undo fifty timeouts as fast as they made them. The freshest talkers
+// are kept when the blast is oversubscribed, matching how the rifle already picks.
+const GRENADE_MAX_TARGETS = 20;
 // How long a mirrored viewer card stays fresh.
 //
 // Raised from 5 minutes to 30 on 2026-08-14, deliberately trading freshness for call volume. The
@@ -334,11 +358,21 @@ async function processVoteRequest(doc) {
 // ---------------------------------------------------------------------------
 // 5. The sniper
 // ---------------------------------------------------------------------------
+//
+// Shots a moderator fired from the review desk's rifle scope. The web app only ever writes the
+// REQUEST (db/sniperShotsRepo.js) - picking who actually gets hit happens here, server-side, so
+// the page can never nominate a victim.
+//
+// There is no per-channel toggle in front of this, and deliberately so: the bot never shoots on its
+// own, so the only way to get here is a moderator pulling the trigger at the desk - which is already
+// the decision a toggle would have been asking about. (One existed until 2026-08-08, left from an
+// earlier version that fired automatically every time a chat vote closed. That automatic path is
+// gone; the toggle survived only as a switch that made the rifle silently do nothing.)
 
 // Narrows recent chatters down to who the sniper is allowed to hit at all. Excluded, in order:
 // the bot itself, the broadcaster, everyone in the channel's moderator cache, and every account in
 // config/knownBots.js. Doesn't touch ban status - that check needs a Helix round trip, done
-// separately in fireSniper() so this stays a plain sync filter.
+// separately in buildTargetPool() so this stays a plain sync filter.
 //
 // The exclusions aren't politeness: sniping a moderator or the broadcaster would have the bot
 // remove the people who can undo it (and, for a `ban`, remove the moderator who was mid-review),
@@ -356,19 +390,34 @@ function pickEligibleChatters(chatters, broadcasterId) {
   });
 }
 
-// Fires one shot that a moderator requested from the review desk's rifle scope. The web app only
-// ever writes the REQUEST (db/sniperShotsRepo.js) - picking who actually gets hit happens here,
-// server-side, so the page can never nominate a victim.
+// Draws one victim out of the eligible pool, biased towards whoever spoke most recently -
+// see SNIPER_RECENCY_BIAS for why the draw isn't flat. Every candidate keeps a non-zero chance,
+// and a candidate with no usable `last_message_at` is weighted as if it sat at the window's edge,
+// so a missing timestamp costs that person some odds rather than throwing.
 //
-// There is no per-channel toggle in front of this, and deliberately so: the bot never shoots on its
-// own, so the only way to get here is a moderator pulling the trigger at the desk - which is already
-// the decision a toggle would have been asking about. (One existed until 2026-08-08, left from an
-// earlier version that fired automatically every time a chat vote closed. That automatic path is
-// gone; the toggle survived only as a switch that made the rifle silently do nothing.)
-//
-// Returns the outcome record, or null if the shot was skipped (nobody eligible in chat). Never
-// throws: a failed shot is a missed shot, not an error worth stopping the poll for.
-async function fireSniper(channelLogin, settings) {
+// Pure apart from Math.random(), which is injectable for tests.
+function pickRecencyWeightedTarget(candidates, now = Date.now(), roll = Math.random()) {
+  if (!candidates.length) return null;
+
+  const weights = candidates.map(candidate => {
+    const at = candidate.last_message_at ? new Date(candidate.last_message_at).getTime() : NaN;
+    if (!Number.isFinite(at)) return 1;
+    const age = Math.min(Math.max(now - at, 0), SNIPER_ACTIVITY_WINDOW_MS);
+    return SNIPER_RECENCY_BIAS ** (1 - age / SNIPER_ACTIVITY_WINDOW_MS);
+  });
+
+  let remaining = roll * weights.reduce((sum, weight) => sum + weight, 0);
+  for (let i = 0; i < candidates.length; i++) {
+    remaining -= weights[i];
+    if (remaining < 0) return candidates[i];
+  }
+  // Only reachable on floating-point rounding at the very top of the range.
+  return candidates[candidates.length - 1];
+}
+
+// Builds the set of people a shot in this channel is allowed to hit right now, plus the
+// broadcaster id the ban call needs. Returns null only when the channel isn't loaded at all.
+async function buildTargetPool(channelLogin) {
   const channel = `#${channelLogin}`;
   const broadcasterId = String(botInitInfo.channels[channelLogin]?.id || '');
   if (!broadcasterId) return null;
@@ -376,35 +425,71 @@ async function fireSniper(channelLogin, settings) {
   const since = new Date(Date.now() - SNIPER_ACTIVITY_WINDOW_MS);
   const recentChatters = await chatStats.getRecentChatters(channel, since);
   const eligible = pickEligibleChatters(recentChatters, broadcasterId);
-  if (!eligible.length) {
-    console.log(`[UnbanRequests] Sniper found no eligible target in ${channel}`);
-    return null;
-  }
+  if (!eligible.length) return { broadcasterId, candidates: [] };
 
   // Don't "shoot" someone who is already gone. This reads our own ModeratorActionLogs rather than
   // Helix: EventSub's channel.moderate reports bans/timeouts issued by human moderators through
   // Twitch's native UI too, and Helix's Get Banned Users is unusable from a moderator token (see
   // twitch/TwitchBanAPI.js's note - it answered 401 on every call). The same `since` as the
   // candidate pool is the whole window that can matter: everyone here posted a message inside it.
+  //
+  // It cannot see the volley's OWN hits, though - those come back over EventSub long after the
+  // tick that fired them - which is why a volley draws without replacement instead of rebuilding
+  // this per shot. See fireVolley().
   const alreadyBanned = await chatStats.getPunishedUserIds(
     channelLogin,
     eligible.map(chatter => chatter.user_id),
     since
   );
-  const candidates = eligible.filter(chatter => !alreadyBanned.has(String(chatter.user_id)));
-  if (!candidates.length) {
-    console.log(`[UnbanRequests] Sniper found no eligible target in ${channel}`);
-    return null;
-  }
 
-  const target = candidates[Math.floor(Math.random() * candidates.length)];
+  return {
+    broadcasterId,
+    candidates: eligible.filter(chatter => !alreadyBanned.has(String(chatter.user_id))),
+  };
+}
 
-  const mode = settings.sniperMode === 'ban' ? 'ban' : 'timeout';
-  const durationSec =
-    mode === 'ban'
+// Everyone a grenade thrown right now would take: the slice of the pool that spoke inside
+// GRENADE_BLAST_WINDOW_MS, freshest first, capped at GRENADE_MAX_TARGETS.
+//
+// No randomness at all, unlike the rifle - "everyone who was just talking" is the whole point of
+// the weapon, and a grenade that skipped people at random would just be a slower rifle. A candidate
+// with no usable `last_message_at` is left out rather than assumed fresh: the blast errs towards
+// hitting fewer people, which is the direction a mistake should go here.
+function pickBlastTargets(candidates, now = Date.now()) {
+  return candidates
+    .map(candidate => {
+      const at = candidate.last_message_at ? new Date(candidate.last_message_at).getTime() : NaN;
+      return { candidate, at };
+    })
+    .filter(entry => Number.isFinite(entry.at) && now - entry.at <= GRENADE_BLAST_WINDOW_MS)
+    .sort((a, b) => b.at - a.at)
+    .slice(0, GRENADE_MAX_TARGETS)
+    .map(entry => entry.candidate);
+}
+
+// Reads the punishment a weapon deals from the channel's settings. Anything that isn't the literal
+// 'ban' means 'timeout' - the milder of the two - so a garbled ChannelConfig value can never
+// escalate a channel to real bans.
+function punishmentFor(weapon, settings) {
+  const isGrenade = weapon === 'grenade';
+  const mode = (isGrenade ? settings.grenadeMode : settings.sniperMode) === 'ban' ? 'ban' : 'timeout';
+  const rawSec = isGrenade ? settings.grenadeTimeoutSec : settings.sniperTimeoutSec;
+  return {
+    mode,
+    durationSec: mode === 'ban'
       ? null
-      : Math.min(MAX_SNIPER_SEC, Math.max(MIN_SNIPER_SEC, Number(settings.sniperTimeoutSec) || 60));
-  const reason = settings.sniperReason || 'Шальная пуля Бюро амнистии';
+      : Math.min(MAX_SNIPER_SEC, Math.max(MIN_SNIPER_SEC, Number(rawSec) || 60)),
+    reason: (isGrenade ? settings.grenadeReason : settings.sniperReason)
+      || (isGrenade ? 'Осколки Бюро амнистии'
+                    : 'Шальная пуля Бюро амнистии'),
+  };
+}
+
+// Fires one shot at an already-chosen target. Returns the outcome record; never throws, because a
+// failed shot is a missed shot, not an error worth stopping the poll for.
+async function fireShotAt(channelLogin, broadcasterId, target, settings) {
+  const channel = `#${channelLogin}`;
+  const { mode, durationSec, reason } = punishmentFor('awp', settings);
 
   // TwitchBanAPI now RETURNS whether Twitch accepted the action (it logged nothing and swallowed
   // everything until 2026-08-14, so this said `success: true` for a shot that never landed - which
@@ -436,6 +521,130 @@ async function fireSniper(channelLogin, settings) {
     firedAt: new Date(),
     success,
   };
+}
+
+// Throws one grenade: every target in the blast, punished together. Returns the outcome record;
+// never throws, for the same reason fireShotAt() doesn't.
+//
+// The calls go out at once rather than in sequence because they are one act - a blast that took
+// twenty seconds to work through its victims would land on people who spoke AFTER it went off.
+async function throwGrenadeAt(channelLogin, broadcasterId, targets, settings) {
+  const channel = `#${channelLogin}`;
+  const { mode, durationSec, reason } = punishmentFor('grenade', settings);
+
+  const hits = await Promise.all(targets.map(async target => {
+    let success = false;
+    try {
+      success = mode === 'ban'
+        ? await TwitchBanAPI.ban(target.user_id, broadcasterId, reason)
+        : await TwitchBanAPI.timeout(target.user_id, durationSec, broadcasterId, reason);
+    } catch (error) {
+      console.error(`[UnbanRequests] Grenade ${mode} failed in ${channel}:`, describeError(error));
+    }
+    return { userId: String(target.user_id), login: target.user_login, success };
+  }));
+
+  const landed = hits.filter(hit => hit.success);
+  if (landed.length < hits.length) {
+    // TwitchBanAPI has already logged what Twitch said about each one; this ties it to the throw.
+    console.error(
+      `[UnbanRequests] Grenade in ${channel}: Twitch refused ${hits.length - landed.length} of ` +
+      `${hits.length} (${hits.filter(h => !h.success).map(h => '@' + h.login).join(', ')})`
+    );
+  }
+
+  return {
+    fired: true,
+    // Only the ones that actually landed are reported as hit - the desk announces this list, and a
+    // name in it is a claim that the person is really gone from chat.
+    targetLogins: landed.map(hit => hit.login),
+    targetUserIds: landed.map(hit => hit.userId),
+    targetCount: hits.length,
+    hitCount: landed.length,
+    mode,
+    durationSec,
+    firedAt: new Date(),
+    success: landed.length > 0,
+  };
+}
+
+// Everything claimed for ONE channel in this tick, fired as a volley: one target-pool read, targets
+// handed out WITHOUT replacement, and the Twitch calls issued together.
+//
+// Twitch has no batch ban - POST /helix/moderation/bans carries a single `user_id`, so N victims are
+// always N requests and no grouping can change that. What a volley buys is the other three costs.
+// The pool query pair (recent chatters + already-punished) is identical for everything fired in the
+// same tick, and now runs once instead of once per shot. The requests overlap instead of queueing,
+// so a burst still resolves inside one ~2s tick - which matters because the fast lane cannot overlap
+// itself (see start()). And the part that was actually wrong before: two shots in the same tick
+// could pick the SAME victim, because the already-punished filter reads ModeratorActionLogs, which
+// is fed by EventSub - the volley's own first hit is never visible to its second. Handing out
+// targets without replacement is the only thing that can see it.
+//
+// Targets are assigned in one synchronous pass BEFORE anything is fired, so who gets what doesn't
+// depend on how fast Twitch answers. Grenades are served first: a blast is "everyone talking right
+// now", and letting a rifle shot pick someone out of it first would quietly punch a hole in that.
+//
+// A volley larger than the pool is honest about it: whatever is left with nobody to hit completes as
+// `no_target`, the same outcome a shot into an empty chat has always had.
+async function fireVolley(channelLogin, shots) {
+  const channel = `#${channelLogin}`;
+  const settings = channelSettings.getSettings(channelLogin).unbanBureau || {};
+
+  const pool = await buildTargetPool(channelLogin).catch(err => {
+    console.error(`[UnbanRequests] Sniper target pool failed in ${channel}:`, describeError(err));
+    return null;
+  });
+
+  const candidates = pool ? pool.candidates.slice() : [];
+  if (!candidates.length) {
+    console.log(
+      `[UnbanRequests] Sniper found no eligible target in ${channel} (${shots.length} shot(s))`
+    );
+  }
+
+  const take = victims => {
+    for (const victim of victims) {
+      const at = candidates.indexOf(victim);
+      if (at !== -1) candidates.splice(at, 1);
+    }
+    return victims;
+  };
+
+  const ordered = [
+    ...shots.filter(shot => shot.weapon === 'grenade'),
+    ...shots.filter(shot => shot.weapon !== 'grenade'),
+  ];
+  const assignments = ordered.map(shot => {
+    if (shot.weapon === 'grenade') return { shot, targets: take(pickBlastTargets(candidates)) };
+    const target = pickRecencyWeightedTarget(candidates);
+    return { shot, targets: target ? take([target]) : [] };
+  });
+
+  await Promise.all(assignments.map(async ({ shot, targets }) => {
+    if (!targets.length) {
+      return sniperShotsRepo.complete(shot._id, { status: 'failed', failureReason: 'no_target' });
+    }
+
+    const outcome = await (shot.weapon === 'grenade'
+      ? throwGrenadeAt(channelLogin, pool.broadcasterId, targets, settings)
+      : fireShotAt(channelLogin, pool.broadcasterId, targets[0], settings)
+    ).catch(err => {
+      console.error(`[UnbanRequests] Sniper failed in ${channel}:`, describeError(err));
+      return null;
+    });
+
+    // Three distinguishable outcomes, and the review desk needs all three: a hit, a shot with
+    // nobody eligible to hit, and a target Twitch then refused to act on. The last two were
+    // indistinguishable (and the third was reported as a hit) until 2026-08-14.
+    return sniperShotsRepo.complete(shot._id, outcome
+      ? {
+        status: outcome.success ? 'done' : 'failed',
+        ...outcome,
+        failureReason: outcome.success ? null : 'twitch_rejected',
+      }
+      : { status: 'failed', failureReason: 'no_target' });
+  }));
 }
 
 async function processVoteClosure(doc) {
@@ -516,29 +725,31 @@ async function fastTick() {
 // Returns how many shots it fired, for the same reason processVotes() counts - see start().
 async function fireQueuedShots() {
   const shots = await sniperShotsRepo.findPending();
+
+  // Claim everything first: without it a slow Helix call would let the next 2s tick fire the same
+  // shot again. Claiming the whole batch up front is also what makes a volley possible - the shots
+  // are grouped by channel below, and one still sitting unclaimed can't join its own volley.
+  const claimed = [];
   for (const shot of shots) {
-    // Claim first: without it a slow Helix call would let the next 2s tick fire the same shot again.
-    if (!(await sniperShotsRepo.claim(shot._id))) continue;
+    if (await sniperShotsRepo.claim(shot._id)) claimed.push(shot);
+  }
+  if (!claimed.length) return 0;
 
-    const settings = channelSettings.getSettings(shot.channelLogin).unbanBureau || {};
-    const outcome = await fireSniper(shot.channelLogin, settings).catch(err => {
-      console.error(`[UnbanRequests] Sniper failed in #${shot.channelLogin}:`, describeError(err));
-      return null;
-    });
-
-    // Three distinguishable outcomes, and the review desk needs all three: a hit, a shot with
-    // nobody eligible to hit, and a target Twitch then refused to act on. The last two were
-    // indistinguishable (and the third was reported as a hit) until 2026-08-14.
-    await sniperShotsRepo.complete(shot._id, outcome
-      ? {
-        status: outcome.success ? 'done' : 'failed',
-        ...outcome,
-        failureReason: outcome.success ? null : 'twitch_rejected',
-      }
-      : { status: 'failed', failureReason: 'no_target' });
+  const byChannel = new Map();
+  for (const shot of claimed) {
+    if (!byChannel.has(shot.channelLogin)) byChannel.set(shot.channelLogin, []);
+    byChannel.get(shot.channelLogin).push(shot);
   }
 
-  return shots.length;
+  // Channels one after another, the shots inside a channel together: a volley's whole point is the
+  // one pool it shares, and two channels share nothing.
+  for (const [channelLogin, channelShots] of byChannel) {
+    await fireVolley(channelLogin, channelShots).catch(err => {
+      console.error(`[UnbanRequests] Sniper volley failed in #${channelLogin}:`, describeError(err));
+    });
+  }
+
+  return claimed.length;
 }
 
 // A vote marked active in Mongo but absent from memory means the bot restarted mid-vote. Rebuild
@@ -638,9 +849,11 @@ async function runFastTick() {
 module.exports = {
   start,
   tick,
-  // Exported for test/unbanSniper_test.js - it's the one piece of sniper logic that's pure enough
-  // to check without a live Twitch connection.
+  // The two pieces of sniper logic pure enough to check without a live Twitch connection: who may
+  // be hit at all, and which of them the draw lands on.
   pickEligibleChatters,
+  pickRecencyWeightedTarget,
+  pickBlastTargets,
   fastTick,
   // Exported so scripts/local/probeModComments.js can drive the real mirroring path instead of a
   // hand-copied version of it.
@@ -653,4 +866,8 @@ module.exports = {
   nextFastDelay,
   MIN_SNIPER_SEC,
   MAX_SNIPER_SEC,
+  SNIPER_ACTIVITY_WINDOW_MS,
+  SNIPER_RECENCY_BIAS,
+  GRENADE_BLAST_WINDOW_MS,
+  GRENADE_MAX_TARGETS,
 };

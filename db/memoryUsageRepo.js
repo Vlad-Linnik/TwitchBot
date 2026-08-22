@@ -7,8 +7,8 @@
 // Both halves of that matter.
 //
 // - Sampling hourly would be useless. Disk grows monotonically over days, so an hourly point
-//   describes it fully; memory pressure arrives in seconds. With no swap on this VPS the kernel
-//   answers a spike with the OOM killer, and an hourly point sample would land either side of the
+//   describes it fully; memory pressure arrives in seconds. A spike that outruns what swap can
+//   absorb is answered by the OOM killer, and an hourly point sample would land either side of the
 //   spike that killed the process and show nothing at all.
 // - Storing every 30s sample would be 259k documents per 90 days. Keeping min/avg/max per hour
 //   holds the retention at the same ~2,160 documents the disk sampler costs while still recording

@@ -1,12 +1,15 @@
 // Machine-memory sampler for TwitchBot-Web's admin panel Memory tab - the counterpart to
 // diskUsageScheduler.js, and built because the disk was the only resource we could see coming.
 //
-// The prod VPS has 1833 MB of RAM and NO swap at all (SwapTotal 0). That combination means the
-// kernel has nothing to page out when memory runs short, so pressure is resolved by the OOM killer
-// picking a process and terminating it - which, for this bot, looks like a sudden restart with no
-// crash, no stack trace and nothing whatsoever in the log. BotHeartbeat already recorded this
-// process's own RSS, but a single overwritten document holds no history, and RSS says nothing about
-// the machine: mongod and the web panel share the same 1833 MB.
+// Memory shortage is the one failure this bot cannot report on itself: the kernel resolves it by
+// picking a process and terminating it, which looks like a sudden restart with no crash, no stack
+// trace and nothing whatsoever in the log. Swap only softens that - paging is slow enough to read
+// as a hang, and a fast allocation burst outruns it into the same silent kill - so the machine's
+// own numbers have to be recorded from outside the moment they matter, i.e. continuously.
+// BotHeartbeat already recorded this process's own RSS, but a single overwritten document holds no
+// history, and RSS says nothing about the machine: mongod and the web panel share the same RAM.
+// (Actual sizes - RAM, swap, who else is resident - are readings, not constants; they live in the
+// samples and on the panel, deliberately not in this comment.)
 //
 // Like the disk sampler this is a pure local read (procfs + os), never touches Twitch, and is
 // started unconditionally from index.js.
