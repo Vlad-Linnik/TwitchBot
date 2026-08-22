@@ -52,6 +52,14 @@ const DEFAULT_CHANNEL_SETTINGS = {
   // shot went off automatically whenever a chat vote closed. These three only say what the shot does
   // to whoever it hits. Nested under `unbanBureau` because the rifle lives on that page and nowhere
   // else. TwitchBot-Web/config/defaultChannelConfig.json is a hand-kept copy of this block.
+  //
+  // The `grenade*` fields are the second weapon at that desk: instead of one drawn victim it takes
+  // EVERYONE who spoke in the last 30 seconds. Its own mode/duration/reason rather than the
+  // sniper's, because the sensible punishment for a blast that hits a dozen people at once is not
+  // the one you would pick for a single joke victim. `grenadeCooldownSec` is the only reason it
+  // isn't a spam button: unlike the rifle it is rate-limited PER CHANNEL, so a second one cannot
+  // follow the first no matter how many moderators are at the desk. It has a floor (see
+  // TwitchBot-Web/lib/unbanBureauValidation.js) - a channel can lengthen the wait, never remove it.
   unbanBureau: {
     enabled: false,
     // Twitch GLOBAL emotes (verified `source: twitch-global` in the whiteList), so every viewer can
@@ -62,6 +70,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
     sniperMode: "timeout", // 'timeout' | 'ban'
     sniperTimeoutSec: 60, // ignored when sniperMode === 'ban'
     sniperReason: "Шальная пуля Бюро амнистии",
+    grenadeMode: "timeout", // 'timeout' | 'ban'
+    grenadeTimeoutSec: 60, // ignored when grenadeMode === 'ban'
+    grenadeReason: "Осколки Бюро амнистии",
+    grenadeCooldownSec: 600,
   },
   responses: {
     busy: ["I am busy"],

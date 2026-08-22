@@ -15,6 +15,11 @@
 // it is the one cross-repo write with a human waiting on the result: the moderator has just fired
 // a rifle and expects someone to drop. The collection stays tiny and the query is a covered index
 // hit on `{status: 'pending'}`, so the cost is negligible.
+// `weapon` says which of the desk's two weapons the row is: 'awp' (the default, and what every row
+// written before 2026-08-22 is - readers must treat a MISSING field as 'awp') hits one drawn victim
+// and fills `targetUserId`/`targetLogin`; 'grenade' takes everyone who spoke in the last 30 seconds
+// and fills `targetLogins`/`targetUserIds`/`targetCount`/`hitCount` instead. The two never both
+// appear on one row, so the desk reads the weapon first and the fields second.
 const { connect } = require('./db.js');
 
 const COLLECTION = 'SniperShots';
