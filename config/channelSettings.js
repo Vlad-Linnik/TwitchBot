@@ -75,6 +75,17 @@ const DEFAULT_CHANNEL_SETTINGS = {
     grenadeReason: "Осколки Бюро амнистии",
     grenadeCooldownSec: 600,
   },
+  // Per-channel half of the AI mention replies (games/aiReply.js). The global half - persona,
+  // model, daily budget, limits - lives in its own AiConfig document instead of being copied into
+  // every channel: it is one setting for the whole bot. Written from the admin panel only
+  // (TwitchBot-Web routes/adminAi.js), never from the channel owner's own settings page - it
+  // spends the project's API budget and can hand out timeouts, which is a tier-0 decision.
+  // enabled starts false so a newly joined channel cannot silently start drawing on that budget.
+  ai: {
+    enabled: false,
+    tone: "",
+    cheatsheet: "",
+  },
   responses: {
     busy: ["I am busy"],
     yesNo: ["Да", "Нет", "Не могу сказать", "eeeh ", "Возможно", "50/50", "Скорее да, чем нет"],

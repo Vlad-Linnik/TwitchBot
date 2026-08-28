@@ -8,6 +8,8 @@ const {
   randomEventsAndThings,
 } = require("../games/randomEvents.js");
 const { question } = require("../games/questionToThisBot.js");
+const aiReply = require("../games/aiReply.js");
+const { isAddressedToBot } = require("../shared/addressedToBot.js");
 const {
   getDota2RandomItem,
 } = require("../games/randomEvents.js");
@@ -90,12 +92,22 @@ function directMsgCheck(client, channel, userState, message) {
     return 0;
   }
 
-  if (message.toLowerCase().includes(`@${botInitInfo.settings["username"].toLowerCase()}`)) {
-    const checks = [mcopDuelExecute, isInsult, question];
-    for (const check of checks) {
+  if (isAddressedToBot(userState, message)) {
+    // Order is load bearing: the banned-word check has to see the message before anything can
+    // answer it, and question() is now the fallback rather than the first responder - it used to
+    // swallow every message with a question mark, which is exactly the traffic the AI path wants.
+    for (const check of [mcopDuelExecute, isInsult]) {
       if (check(client, channel, userState, message)) {
         return 1;
       }
+    }
+    // Returns true the moment it takes responsibility for a reply; the API call itself runs
+    // detached (see games/aiReply.js), so nothing below waits on it.
+    if (aiReply.tryAnswer(client, channel, userState, message)) {
+      return 1;
+    }
+    if (question(client, channel, userState, message)) {
+      return 1;
     }
     const settings = channelSettings.getSettings(channel);
     if (settings.commands.directmsg.enabled && isTimerReady(lastDirectMSG.get(channel) || 0, settings.commands.directmsg.cooldownMs)){

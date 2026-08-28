@@ -30,6 +30,8 @@ async function bootstrap() {
   const healthTracker = require('./shared/healthTracker.js');
   const describeError = require('./shared/describeError.js');
   const gqlClient = require('./twitch/gqlClient.js');
+  const aiReply = require('./games/aiReply.js');
+  const { mentionsBotName, isReplyToBot } = require('./shared/addressedToBot.js');
 
   // bot settings
   const opts = {
@@ -197,6 +199,9 @@ async function bootstrap() {
           .catch(err => console.error('[ChatStats] addMessage error:', err));
         // counts toward the "standard messages between automated commands" gate
         customCommands.recordChatMessage(channel);
+        // Rolling last-N-lines buffer games/aiReply.js reads for context - and, just as
+        // importantly, for the list of logins the model is allowed to put an "@" in front of.
+        aiReply.recordChatLine(channel, userState["username"], message);
       }
 
       // spam protection
@@ -222,8 +227,9 @@ async function bootstrap() {
         }
       }
 
-      // direct msg to this bot
-      if (message.toLowerCase().includes(botInitInfo.settings["username"].toLowerCase())) {
+      // direct msg to this bot - by name, or as a Twitch reply to something the bot said, which
+      // carries no name at all (see shared/addressedToBot.js).
+      if (mentionsBotName(message) || isReplyToBot(userState)) {
         if (msgHandle.directMsgCheck(client, channel, userState, message)) {
           return;
         }
