@@ -8,7 +8,8 @@
 //
 // SHAPE OF THE PATH, and why:
 //
-//   mention -> banned words -> [filter] -> [answer cache] -> model -> sanitize -> reply
+//   mention -> banned words -> [filter] -> [answer cache] -> [тот же вопрос другими словами]
+//     -> model -> sanitize -> reply
 //
 // The two lookaside tables in the middle are what keeps this affordable. They are checked before
 // the API is ever contacted; the filter is global (a greeting means the same thing everywhere)
@@ -34,9 +35,12 @@
 // написанные админом - отбор в shared/memoryRecall.js. Поэтому чисел два: channelMemoryMax
 // ограничивает хранилище, channelMemoryRecall - то, что реально оплачивается на каждом вызове.
 //
-// Тот же модуль ищет среди уже отвеченных вопросов канала похожий на заданный и кладёт прошлый
-// ответ в промт подсказкой. Это не отменяет проверку кэша по точному совпадению выше: та отвечает
-// вообще без вызова модели, а здесь вызов всё равно происходит и подсказку можно не принять.
+// Тот же модуль сравнивает заданный вопрос с уже отвеченными вопросами канала, и у находки два
+// разных исхода. Совпал НАБОР значимых слов - это тот же вопрос другими словами, прошлый ответ
+// уходит в чат без вызова модели, а новая формулировка дописывается в кэш, чтобы дальше её ловило
+// точное совпадение. Просто похоже - вызов происходит, но прошлый ответ идёт в промт подсказкой,
+// и модель вправе её отбросить. Цена ошибки у двух исходов разная, поэтому и правила разные:
+// бесплатный ответ требует тождества наборов слов, подсказка - лишь доли общих.
 const botInitInfo = require('../botInitInfo.js');
 const channelSettings = require('../config/channelSettings.js');
 const aiSettings = require('../config/aiSettings.js');
@@ -468,15 +472,40 @@ async function answer(client, channel, userState, message, cfg, settings) {
     return;
   }
 
+  // 3. Тот же вопрос, но другими словами. Проверка стоит здесь, а не в общем чтении ниже, чтобы
+  // путь сохранял свою форму: каждая следующая ступень дороже предыдущей и выполняется, только
+  // если предыдущая не ответила. Один индексный запрос перед вызовом модели ничего не стоит на
+  // фоне её бюджета в несколько секунд.
+  const answered = await aiStore.recentAnswers(channel, SIMILAR_SCAN_LIMIT);
+  const similar = memoryRecall.findSimilarAnswer(question, answered);
+
+  if (similar && similar.same) {
+    const sent = send(similar.answer);
+    // Формулировка кладётся в кэш как ещё один ключ к тому же ответу. Дальше её ловит точное
+    // совпадение выше - то есть скан двухсот строк окупается один раз, а потом это обычный поиск
+    // по индексу. Ответ уже был признан моделью долгоживущим, иначе его бы в кэше не было, и
+    // другая формулировка того же вопроса не делает его менее долгоживущим.
+    await aiStore.cacheAnswer(channel, question, similar.answer);
+    await aiStore.writeLog({
+      ...base,
+      answer: similar.answer,
+      source: 'cacheSimilar',
+      verdict: 'normal',
+      billed: false,
+      sent,
+      similarTo: similar.text,
+    });
+    return;
+  }
+
   const channelEntry = botInitInfo.channels[channel.replace('#', '')];
   const lines = (recentChat.get(channel) || []).slice();
-  const [card, memory, stored, answered] = await Promise.all([
+  const [card, memory, stored] = await Promise.all([
     channelEntry ? aiStore.streamCard(channelEntry.id) : Promise.resolve({ live: false }),
     aiStore.recentExchanges(channel, base.userId, cfg.memoryPairs),
     // Read even when self-writing is switched off: the switch governs what the bot may ADD, while
     // whatever an admin has put in the memory by hand is part of what the bot knows either way.
     aiStore.listMemory(channel, cfg.channelMemoryMax),
-    aiStore.recentAnswers(channel, SIMILAR_SCAN_LIMIT),
   ]);
   const allowed = allowedMentionLogins(question, lines);
 
@@ -490,10 +519,6 @@ async function answer(client, channel, userState, message, cfg, settings) {
   const facts = manual
     .concat(memoryRecall.rankFacts(question, learned, cfg.channelMemoryRecall))
     .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
-  // Точное совпадение уже проверено выше и ответило бы без вызова модели. Здесь - только
-  // подсказка: похоже, об этом уже спрашивали другими словами.
-  const similar = memoryRecall.findSimilarAnswer(question, answered);
 
   let res;
   const startedAt = Date.now();

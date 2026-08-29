@@ -74,6 +74,16 @@ function stemsOf(text) {
   return out;
 }
 
+// Два стема - формы одного слова. Единственное место, где это решается: и подсчёт совпадений
+// ниже, и проверка «тот же самый вопрос» обязаны понимать одинаково, иначе вопрос мог бы
+// считаться тем же самым по одному правилу и не тем же по другому.
+function isPrefixVariant(a, b) {
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length < PREFIX_MATCH_MIN) return false;
+  if (long.length - short.length > PREFIX_MATCH_MAX_EXTRA) return false;
+  return long.startsWith(short);
+}
+
 // Сколько стемов вопроса нашлось в наборе стемов документа. Точное совпадение - балл, совпадение
 // по началу более длинного слова - неполный: «игр» и «игра» почти наверняка об одном, но «пар»
 // и «парк» - уже нет, и цена этой разницы не должна быть равна цене прямого попадания.
@@ -89,11 +99,7 @@ function overlap(queryStems, docStems) {
     }
     let best = 0;
     for (const d of docStems) {
-      if (d === q) continue;
-      const [short, long] = q.length <= d.length ? [q, d] : [d, q];
-      if (short.length < PREFIX_MATCH_MIN) continue;
-      if (long.length - short.length > PREFIX_MATCH_MAX_EXTRA) continue;
-      if (long.startsWith(short)) best = PREFIX_MATCH_WEIGHT;
+      if (d !== q && isPrefixVariant(q, d)) best = PREFIX_MATCH_WEIGHT;
     }
     if (best) {
       score += best;
@@ -165,13 +171,38 @@ const SIMILAR_MIN_RATIO = 0.55;
 // Одного общего слова мало: «какая игра» и «какая карта» разошлись бы в одном слове из двух.
 const SIMILAR_MIN_MATCHED = 2;
 
+// «Тот же самый вопрос»: у обоих один и тот же НАБОР значимых слов, с точностью до порядка,
+// словоформы и мусорных слов. Это не подобранное число, а правило, и в нём весь смысл - на такой
+// находке ответ отдаётся вообще без обращения к модели, а значит она должна быть объяснима одной
+// фразой, а не порогом.
+//
+// По сути это расширение того же допуска, что уже есть в shared/aiTextKey.js. Тот приводит вопрос
+// к ключу по регистру и пробелам и на точном совпадении отвечает бесплатно; здесь к тому же
+// допуску добавляются порядок слов, словоформа и слова, не несущие смысла. «Какие фильтры
+// используешь» и «какой фильтр ты используешь» - один вопрос. «Во сколько СЕГОДНЯ начнётся стрим»
+// и «во сколько начинается стрим» - уже нет: лишнее значимое слово может менять вопрос, и такие
+// случаи уходят в подсказку модели ниже, а не в бесплатный ответ.
+function coversAll(from, to) {
+  return from.every((a) => to.some((b) => a === b || isPrefixVariant(a, b)));
+}
+
+function isSameQuestion(aStems, bStems) {
+  if (!aStems.length || !bStems.length) return false;
+  return coversAll(aStems, bStems) && coversAll(bStems, aStems);
+}
+
 /**
  * Ищет в уже отвеченных вопросах канала тот, что по словам совпадает с текущим. Возвращает
- * { text, answer, ratio } или null.
+ * { text, answer, ratio, same } или null.
  *
- * Это НЕ замена точному совпадению в db/aiStore.js: то отдаёт ответ сразу и без вызова модели,
- * это - только подсказка в промт. Поэтому здесь можно позволить себе нестрогое сравнение: цена
- * ложной находки - одна строка контекста, которую модель прочитает и отбросит.
+ * `same: true` означает «это тот же вопрос другими словами» - вызывающий вправе отдать прошлый
+ * ответ и не платить за вызов. `same: false` - только похоже; такая находка идёт в промт
+ * подсказкой, и цена ошибки там одна строка контекста, которую модель вправе отбросить. Два
+ * разных ответа на один вопрос дают два разных права, поэтому и возвращаются они одним полем, а
+ * не двумя вызовами по разным порогам.
+ *
+ * Строка с точным совпадением набора слов побеждает любую другую, даже если у той выше доля
+ * общих слов: доля - оценка похожести, совпадение набора - утверждение о тождестве.
  */
 function findSimilarAnswer(question, rows) {
   const queryStems = stemsOf(question).slice(0, MAX_QUERY_STEMS);
@@ -182,13 +213,18 @@ function findSimilarAnswer(question, rows) {
     if (!row || !row.answer) continue;
     const docStems = stemsOf(row.text);
     if (!docStems.length) continue;
+
+    if (isSameQuestion(queryStems, docStems)) {
+      return { text: row.text, answer: row.answer, ratio: 1, same: true };
+    }
+
     const { score, matched } = overlap(queryStems, docStems);
     if (matched < SIMILAR_MIN_MATCHED) continue;
     // Считается по баллу, а не по числу совпавших: совпадение по началу слова весит меньше и
     // здесь, иначе порог обходился бы парой «пар»/«парк».
     const ratio = (2 * score) / (queryStems.length + docStems.length);
     if (ratio < SIMILAR_MIN_RATIO) continue;
-    if (!best || ratio > best.ratio) best = { text: row.text, answer: row.answer, ratio };
+    if (!best || ratio > best.ratio) best = { text: row.text, answer: row.answer, ratio, same: false };
   }
   return best;
 }
@@ -196,6 +232,7 @@ function findSimilarAnswer(question, rows) {
 module.exports = {
   stemsOf,
   overlap,
+  isSameQuestion,
   rankFacts,
   findSimilarAnswer,
   MIN_STEM_LENGTH,
