@@ -1,10 +1,10 @@
 // Bot-side Mongo access for the AI mention replies: the two lookaside tables checked before any
-// API call, the per-call journal, and the permanent ignore list.
+// API call, the per-call journal, the permanent ignore list, and the channel memory.
 //
-// This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog / AiIgnoredUsers -
-// the site reads and curates them (TwitchBot-Web's db/ai*Repo.js) but the bot is what writes them
-// at runtime. Channel keys carry the leading '#', the same convention as every other chat-stat
-// collection in this database.
+// This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog / AiIgnoredUsers /
+// AiChannelMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js) but the bot is
+// what writes them at runtime. Channel keys carry the leading '#', the same convention as every
+// other chat-stat collection in this database.
 const { connect } = require('./db.js');
 const { aiTextKey } = require('../shared/aiTextKey.js');
 
@@ -18,6 +18,7 @@ async function ensureInitialized() {
     cache: db.collection('AiAnswerCache'),
     log: db.collection('AiReplyLog'),
     ignored: db.collection('AiIgnoredUsers'),
+    memory: db.collection('AiChannelMemory'),
     sessions: db.collection('StreamSessions'),
     samples: db.collection('StreamViewerSamples'),
   };
@@ -29,6 +30,8 @@ async function ensureInitialized() {
     cols.log.createIndex({ channel: 1, userId: 1, createdAt: -1 }),
     cols.log.createIndex({ createdAt: -1 }),
     cols.ignored.createIndex({ channel: 1, userId: 1 }, { unique: true }),
+    cols.memory.createIndex({ channel: 1, key: 1 }, { unique: true }),
+    cols.memory.createIndex({ channel: 1, createdAt: 1 }),
   ]);
   return cols;
 }
@@ -117,6 +120,72 @@ async function ignoreUser(channel, userId, login, reason) {
   );
 }
 
+// --- channel memory --------------------------------------------------------
+
+// What the bot has learnt about a channel and keeps re-reading. Deliberately a collection of short
+// separate facts rather than one growing block of text: the model adds and drops them one at a
+// time, and an admin curating them needs a row to delete, not a paragraph to re-edit. The
+// admin-written cheat sheet in ChannelConfig stays what it was - this sits next to it.
+//
+// EVERY fact here is sent on EVERY billed call for that channel, so the count is a cost decision,
+// not just a tidiness one - which is why the ceiling is a setting (channelMemoryMax) and why the
+// rotation below is unconditional.
+
+// Oldest first: that is the order they are numbered in the prompt, and a stable numbering is what
+// makes the model's "forget number N" refer to the same fact it just read.
+async function listMemory(channel, limit) {
+  const c = await ensureInitialized();
+  if (!limit) return [];
+  return c.memory.find({ channel }).sort({ createdAt: 1 }).limit(limit).toArray();
+}
+
+// Returns true when the fact was new. A repeat is not an error - the model re-stating something it
+// already knows is normal, and the duplicate is simply dropped by the unique key.
+async function rememberFact(channel, fact, meta, max) {
+  const c = await ensureInitialized();
+  const key = aiTextKey(fact);
+  if (!key) return false;
+  const res = await c.memory.updateOne(
+    { channel, key },
+    {
+      $setOnInsert: {
+        channel,
+        key,
+        fact: String(fact),
+        source: 'ai',
+        authorLogin: meta.authorLogin || null,
+        authorUserId: meta.authorUserId || null,
+        sourceMessage: meta.sourceMessage || null,
+        createdAt: new Date(),
+      },
+    },
+    { upsert: true }
+  );
+  const added = Boolean(res.upsertedCount);
+
+  // Rotation drops the oldest bot-written facts only. An admin-written one is a deliberate
+  // statement about the channel and must not be evicted by chat traffic; if the admin puts more
+  // of those in than the ceiling allows, that is their own budget to spend.
+  if (added) {
+    const total = await c.memory.countDocuments({ channel });
+    if (total > max) {
+      const stale = await c.memory
+        .find({ channel, source: 'ai' }, { projection: { _id: 1 } })
+        .sort({ createdAt: 1 })
+        .limit(total - max)
+        .toArray();
+      if (stale.length) await c.memory.deleteMany({ _id: { $in: stale.map((d) => d._id) } });
+    }
+  }
+  return added;
+}
+
+async function forgetFact(channel, key) {
+  const c = await ensureInitialized();
+  const res = await c.memory.deleteOne({ channel, key: String(key) });
+  return Boolean(res.deletedCount);
+}
+
 // --- journal / memory / budget --------------------------------------------
 
 async function writeLog(row) {
@@ -176,6 +245,9 @@ module.exports = {
   isIgnored,
   listIgnoredKeys,
   ignoreUser,
+  listMemory,
+  rememberFact,
+  forgetFact,
   writeLog,
   recentExchanges,
   countBilledSince,
