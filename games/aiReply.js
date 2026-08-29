@@ -51,6 +51,7 @@ const botInitInfo = require('../botInitInfo.js');
 const channelSettings = require('../config/channelSettings.js');
 const aiSettings = require('../config/aiSettings.js');
 const aiStore = require('../db/aiStore.js');
+const chatStats = require('../db/chatStats.js');
 const streamStatus = require('../twitch/streamStatus.js');
 const Twitch_ban_API = require('../twitch/TwitchBanAPI.js');
 const { isMod } = require('../shared/isMod.js');
@@ -225,7 +226,7 @@ const SYSTEM_RULES = [
   '',
   'Память о зрителях:',
   '- Факт про конкретного человека («живёт в Казани», «играет на гитаре», «болеет за Спартак») в память канала не идёт: у него свой список. Чтобы записать туда, назови ник этого человека в поле rememberAbout.',
-  '- Ник годится только тот, кто есть в разговоре: автор вопроса или кто-то из последних сообщений чата. Незнакомый ник записать не на кого.',
+  '- Ник должен быть настоящим: назови того, кто действительно пишет в этом чате, хотя бы иногда. Ник, которого на канале не существует, записать не на кого — такой факт уйдёт в память канала, а не к человеку.',
   '- Про себя человек рассказывает сам — это обычный случай. Про другого рассказать может кто угодно, и с чьих слов записано, у факта остаётся навсегда.',
   '- Факт про канал в целом ника не требует: оставь rememberAbout пустым.',
   '- Ниже может быть показано, что ты уже знаешь про участников разговора. Нумерация у обоих списков общая, forget работает по ней же.',
@@ -410,10 +411,9 @@ function stripBotMention(message) {
     .trim();
 }
 
-// Кто есть в этом разговоре, ник -> { userId, login }. Ровно эти люди могут оказаться адресатом
-// факта: строка памяти зрителя заводится по user-id, а взять его можно только у автора вопроса и
-// у тех, чьи сообщения ещё лежат в кольце. Названный моделью ник, которого здесь нет, записать
-// не на кого - см. resolveSubject.
+// Кто есть в этом разговоре, ник -> { userId, login }. Это БЫСТРАЯ ступень опознания адресата, а
+// не единственная: здесь user-id уже под рукой и запрос не нужен. Ник, которого тут нет, ещё не
+// выдуман - его ищут в базе, см. resolveSubject.
 //
 // Автор добавляется последним и перекрывает свою же строку из кольца: там id мог не сохраниться
 // (строки, записанные до появления поля), а у автора он есть всегда.
@@ -434,13 +434,23 @@ function chatParticipants(userState, lines) {
 //
 // Чужие ограничены: каждый добавленный человек - это его факты во входных токенах каждого такого
 // вызова, а называют в вопросе обычно одного.
-function memorySubjects(question, people, authorLogin) {
+async function memorySubjects(channel, question, people, authorLogin) {
   const author = people.get(authorLogin);
   const subjects = author ? [author] : [];
   const seen = new Set(subjects.map((p) => p.userId));
   for (const m of String(question).match(/@?[a-z0-9_]{3,25}/gi) || []) {
     if (subjects.length >= MAX_EXTRA_SUBJECTS + 1) break;
-    const person = people.get(m.replace('@', '').toLowerCase());
+    const login = m.replace('@', '').toLowerCase();
+    // Та же лестница, что и при записи: сначала разговор, потом база. Иначе факт про молчащего
+    // человека можно было бы записать, но нельзя прочитать, пока он сам не заговорит.
+    let person = people.get(login);
+    if (!person) {
+      try {
+        person = await chatStats.findUserByLogin(channel, login);
+      } catch (err) {
+        person = null;
+      }
+    }
     if (!person || seen.has(person.userId)) continue;
     seen.add(person.userId);
     subjects.push(person);
@@ -448,14 +458,29 @@ function memorySubjects(question, people, authorLogin) {
   return subjects;
 }
 
-// Ник из поля rememberAbout - в человека, про которого можно завести строку. Не нашёлся - null, и
-// факт уходит в память канала: модель могла назвать выдуманный ник, а могла сказать что-то верное
-// про сообщество, и выбрасывать факт из-за неразобранного адресата дороже, чем записать его туда,
-// где его увидит и почистит человек.
-function resolveSubject(name, people) {
+// Ник из поля rememberAbout - в человека, про которого можно завести строку.
+//
+// Сначала разговор, потом база. Кольцо отвечает без запроса и покрывает обычный случай - человек
+// сейчас здесь. Но рассказывают и про тех, кто сегодня молчит, а «его нет в последних пяти
+// строках» ничего не говорит о том, существует ли такой ник: это разные вопросы, и второй решается
+// поиском в UserIdentities с проверкой, что человек писал именно в этом канале.
+//
+// Не нашёлся нигде - null, и факт уходит в память канала. Модель могла выдумать ник, а могла
+// сказать что-то верное про сообщество, и выбрасывать факт из-за неразобранного адресата дороже,
+// чем записать его туда, где его увидит и почистит человек.
+async function resolveSubject(channel, name, people) {
   const login = String(name || '').replace('@', '').trim().toLowerCase();
   if (!login) return null;
-  return people.get(login) || null;
+  const here = people.get(login);
+  if (here) return here;
+  try {
+    return await chatStats.findUserByLogin(channel, login);
+  } catch (err) {
+    // Недоступная база - это «не смогли проверить», а не «ника не существует». Факт уходит в
+    // память канала, то есть туда же, куда и при выдуманном нике: потерять его хуже.
+    console.error('[aiReply] subject lookup failed:', err.message);
+    return null;
+  }
 }
 
 function allowedMentionLogins(question, lines) {
@@ -800,7 +825,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
   const broadcasterId = broadcasterIdOf(channel);
   const lines = (recentChat.get(channel) || []).slice();
   const people = chatParticipants(userState, lines);
-  const subjects = memorySubjects(question, people, String(login || '').toLowerCase());
+  const subjects = await memorySubjects(channel, question, people, String(login || '').toLowerCase());
   // Один момент времени на весь запрос: тот же, что уйдёт в промт, сверяется потом с ответом.
   const askedAt = new Date();
   const nowText = describeNow(askedAt);
@@ -992,7 +1017,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
     // Адресат решает, в какую из двух памятей уйдёт факт, и разрешается он не по слову модели, а
     // по тому, кто действительно есть в разговоре. Названный ник, которого там нет, - это не
     // ошибка и не повод выбросить факт: он идёт в память канала, где его видно человеку.
-    const about = fact ? resolveSubject(out.rememberAbout, people) : null;
+    const about = fact ? await resolveSubject(channel, out.rememberAbout, people) : null;
     // Выключатели тоже разные, потому что это разные решения: «пусть не запоминает про канал» и
     // «пусть не запоминает про людей» - не одно и то же, и второе выключают заметно охотнее.
     const meta = {

@@ -168,6 +168,12 @@ class ChatStats {
       await this.userLifetimeStats.createIndex({ channel: 1, userId: 1 }, { unique: true });
       await this.userLifetimeStats.createIndex({ channel: 1, messageCount: -1 });
       await this.userIdentities.createIndex({ userId: 1 }, { unique: true });
+      // Поиск ПО НИКУ, а не по id: им пользуется память о зрителях (games/aiReply.js), чтобы
+      // проверить, существует ли названный человек. Без этих двух индексов такой запрос был
+      // полным сканом коллекции - терпимо на 23 тысячах строк и уже нет на горячем пути ответа.
+      // История ников индексируется отдельно: на Twitch переименовываются, а факт живёт долго.
+      await this.userIdentities.createIndex({ currentUserName: 1 });
+      await this.userIdentities.createIndex({ 'nicknames.name': 1 });
       await this.wordLifetimeStats.createIndex({ channel: 1, word: 1 }, { unique: true });
       await this.wordLifetimeStats.createIndex({ channel: 1, count: -1 });
       await this.whiteListCollection.createIndex({ channel: 1, word: 1 }, { unique: true });
@@ -928,6 +934,37 @@ class ChatStats {
   // there's no shared-fetch caller pattern here - each channel fetches and syncs its own.
   async syncTwitchChannelEmotes(channel, words) {
     return this.syncEmoteSource(channel, 'twitch-channel', words);
+  }
+
+  // Ник -> человек, если он вообще писал в ЭТОМ канале. Нужен памяти о зрителях: рассказывают в
+  // чате и про тех, кто сегодня молчит, а «нет в последних пяти строках» не доказывает, что такого
+  // ника не существует.
+  //
+  // Две коллекции, а не одна, потому что они отвечают на разные вопросы. UserIdentities общая на
+  // все каналы и говорит только «такой человек боту известен»; без второй проверки факт можно было
+  // бы завести на любого, кого бот видел где угодно, и он бы всплывал в чужом чате. UserLifetimeStats
+  // ключуется {channel, userId} и говорит «он писал именно здесь» - это и есть нужное условие.
+  //
+  // История ников просматривается наравне с текущим: сослаться могут на старое имя, а человек тот же.
+  async findUserByLogin(channel, login) {
+    await this.ensureInitialized();
+    const name = String(login || '').replace('@', '').trim().toLowerCase();
+    if (!name) return null;
+
+    const identity =
+      (await this.userIdentities.findOne({ currentUserName: name })) ||
+      (await this.userIdentities.findOne({ 'nicknames.name': name }));
+    if (!identity) return null;
+
+    const seenHere = await this.userLifetimeStats.findOne(
+      { channel, userId: identity.userId },
+      { projection: { _id: 1 } }
+    );
+    if (!seenHere) return null;
+
+    // Отдаём тот ник, под которым человек известен сейчас, а не тот, которым его назвали: строка
+    // памяти подписывается им же, и в админке человек должен узнаваться по актуальному имени.
+    return { userId: String(identity.userId), login: String(identity.currentUserName || name).toLowerCase() };
   }
 
   async recordUserIdentity(userId, userName, timestamp) {
