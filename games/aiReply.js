@@ -326,8 +326,24 @@ function allowedMentionLogins(question, lines) {
 
 // Applied to what the model produced, not instead of telling it the rules. The instruction is what
 // usually works; this is what always works, and on a cheap model the difference shows.
+// Обрывок разметки вызова инструмента, а не текст. Слабая модель иногда закрывает параметр прямо
+// внутри его значения, и в поле приезжает «</antml_parameter> <parameter name="forget">».
+//
+// Это не гипотеза: на проде такие строки составили 36 из 58 записанных фактов - больше половины
+// памяти канала. В ответах они не всплыли ни разу, но это везение, а не защита: тот же обрывок в
+// reply ушёл бы прямо в чат, поэтому чистится и он тоже.
+const TOOL_MARKUP = /antml|parameter\s+name\s*=|<\s*\/\s*[\w@$.]*parameter|<\s*\/?\s*(?:function|invoke|tool_use)/i;
+
+// В ответе обрывок всегда идёт хвостом - модель дописывает закрывающие теги после готового
+// текста. Поэтому не вырезаем куски из середины, а обрезаем по первому вхождению: всё, что после
+// него, уже не предложение, а попытка закрыть параметр.
+function stripToolMarkup(text) {
+  const at = String(text || '').search(TOOL_MARKUP);
+  return at === -1 ? String(text || '') : String(text).slice(0, at);
+}
+
 function sanitizeReply(text, allowedLogins) {
-  let out = String(text || '').replace(/\s+/g, ' ').trim();
+  let out = stripToolMarkup(text).replace(/\s+/g, ' ').trim();
   out = out.replace(/https?:\/\/\S+/gi, ' ');
   out = out.replace(/\b[\w-]+\.(?:com|net|org|ru|ua|tv|io|me|gg|xyz|dev|app)\b\S*/gi, ' ');
   // A stray "@nick" would ping a real person who never asked to be involved; the name itself can
@@ -344,6 +360,10 @@ function sanitizeReply(text, allowedLogins) {
 // on the way out: it will be read back into every later prompt for this channel, and a link or a
 // leading command character sitting in the memory is a link or a command in a future reply.
 function sanitizeFact(text) {
+  // Факт с обрывком разметки не чистится, а отбрасывается целиком. Это не факт с мусором по
+  // краям, а артефакт разбора: «спасённый» остаток был бы обрывком чужой мысли, который потом
+  // уедет в каждый платный запрос по этому каналу.
+  if (TOOL_MARKUP.test(text)) return '';
   const out = String(text || '')
     .replace(/\s+/g, ' ')
     .replace(/https?:\/\/\S+/gi, ' ')
@@ -657,7 +677,11 @@ async function answer(client, channel, userState, message, cfg, settings, script
   const usage = res.usage || {};
   const price = PRICING[cfg.model];
 
-  const sent = send(reply);
+  // Пустой ответ после очистки - тоже «сказать нечего», и зритель не должен остаться вообще без
+  // реакции. Раньше в такой ситуации в чат уходил мусор, так что молчание было незаметно; после
+  // отбраковки разметки этот случай стал реальным, и он ведёт туда же, куда падение API.
+  const sent = reply ? send(reply) : false;
+  if (!reply) handOff();
 
   let punished = false;
   if (verdict === 'timeout' && !isProtected(userState)) {
