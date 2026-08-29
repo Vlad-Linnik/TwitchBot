@@ -8,8 +8,12 @@
 //
 // SHAPE OF THE PATH, and why:
 //
-//   mention -> banned words -> [filter] -> [answer cache] -> [тот же вопрос другими словами]
-//     -> model -> sanitize -> reply
+//   mention -> banned words -> [эфир] -> [filter] -> [answer cache] -> [тот же вопрос другими
+//     словами] -> model -> sanitize -> reply
+//
+// ОТВЕЧАЕТ БОТ ТОЛЬКО В ЭФИРЕ. Вне эфира вопрос уходит туда же, куда уходил при выключенной фиче -
+// к скриптовым фразам. Это не экономия на пустом чате: разговор офлайн некому увидеть, а расход и
+// риск у ответа те же, что в эфире.
 //
 // The two lookaside tables in the middle are what keeps this affordable. They are checked before
 // the API is ever contacted, and обе - по каналам. Фильтр когда-то был общим на все каналы
@@ -47,6 +51,7 @@ const botInitInfo = require('../botInitInfo.js');
 const channelSettings = require('../config/channelSettings.js');
 const aiSettings = require('../config/aiSettings.js');
 const aiStore = require('../db/aiStore.js');
+const streamStatus = require('../twitch/streamStatus.js');
 const Twitch_ban_API = require('../twitch/TwitchBanAPI.js');
 const { isMod } = require('../shared/isMod.js');
 const { isKnownBot, KNOWN_BOT_LOGINS } = require('../config/knownBots.js');
@@ -523,6 +528,14 @@ function describeRole(userState) {
   return ROLE_LABELS[roleKey(userState)];
 }
 
+// Числовой id канала: он же нужен и статусу эфира, и карточке стрима. Канала может не быть в
+// botInitInfo (его добавили на сайте после старта бота) - тогда id нет, и это значит «не в эфире»,
+// а не «неизвестно, отвечаем».
+function broadcasterIdOf(channel) {
+  const entry = botInitInfo.channels[channel.replace('#', '')];
+  return entry ? entry.id : null;
+}
+
 function isProtected(userState) {
   if (isMod(userState)) return true;
   const badges = userState['badges'];
@@ -648,6 +661,15 @@ function tryAnswer(client, channel, userState, message, scripted) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.ai || !settings.ai.enabled) return false;
 
+  // Не в эфире - не отвечаем. Проверка синхронная и потому читает не базу, а общий реестр
+  // twitch/streamStatus.js, который наполняет опрос ActivitiTracker: до первого успешного опроса
+  // там false, то есть неизвестный статус означает «офлайн», а не «отвечай». Отставание опроса
+  // (минуты) здесь ничего не стоит - на границе эфира лишний или недоданный ответ безобиден.
+  //
+  // В debug-режиме проверка снимается - тем же приёмом и по той же причине, что у авто-отправок
+  // в commands/CustomCommands.js: локальная проверка не должна требовать настоящего стрима.
+  if (!botInitInfo.settings['debug'] && !streamStatus.isLive(broadcasterIdOf(channel))) return false;
+
   if (isBotSender(userState)) return false;
   if (isIgnoredSync(channel, userState['user-id'])) return false;
   if (!isTimerReady(lastAiReply.get(channel) || 0, cfg.cooldownMs)) return false;
@@ -745,7 +767,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
     return;
   }
 
-  const channelEntry = botInitInfo.channels[channel.replace('#', '')];
+  const broadcasterId = broadcasterIdOf(channel);
   const lines = (recentChat.get(channel) || []).slice();
   const people = chatParticipants(userState, lines);
   const subjects = memorySubjects(question, people, String(login || '').toLowerCase());
@@ -753,7 +775,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
   const askedAt = new Date();
   const nowText = describeNow(askedAt);
   const [card, memory, stored, userFacts] = await Promise.all([
-    channelEntry ? aiStore.streamCard(channelEntry.id) : Promise.resolve({ live: false }),
+    broadcasterId ? aiStore.streamCard(broadcasterId) : Promise.resolve({ live: false }),
     aiStore.recentExchanges(channel, base.userId, cfg.memoryPairs),
     // Read even when self-writing is switched off: the switch governs what the bot may ADD, while
     // whatever an admin has put in the memory by hand is part of what the bot knows either way.
