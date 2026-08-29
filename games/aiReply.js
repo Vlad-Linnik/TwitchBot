@@ -30,6 +30,7 @@ const aiSettings = require('../config/aiSettings.js');
 const aiStore = require('../db/aiStore.js');
 const Twitch_ban_API = require('../twitch/TwitchBanAPI.js');
 const { isMod } = require('../shared/isMod.js');
+const { isKnownBot, KNOWN_BOT_LOGINS } = require('../config/knownBots.js');
 const { replyIfBotLacksMod } = require('../shared/botPermission.js');
 const { isTimerReady } = require('../shared/timer.js');
 const healthTracker = require('../shared/healthTracker.js');
@@ -265,6 +266,18 @@ function sanitizeReason(text) {
     .slice(0, MAX_TIMEOUT_REASON_CHARS);
 }
 
+// Other chat bots must never reach the model. games/duelFromMrCopusBot.js only claims the two
+// exact phrases it knows (a duel challenge and a duel result); every OTHER thing mistercopus_bot
+// says that happens to mention us would otherwise fall through to here, cost a request, and get
+// a nonsense answer aimed at a machine - with a real chance of the two bots answering each other.
+//
+// Checked by login first and id second: the id set is resolved from Helix at startup and is empty
+// if that lookup failed, while the login list is always there.
+function isBotSender(userState) {
+  const login = String(userState["username"] || "").toLowerCase();
+  return KNOWN_BOT_LOGINS.includes(login) || isKnownBot(userState["user-id"]);
+}
+
 function isProtected(userState) {
   if (isMod(userState)) return true;
   const badges = userState['badges'];
@@ -319,6 +332,7 @@ function tryAnswer(client, channel, userState, message) {
   const settings = channelSettings.getSettings(channel);
   if (!settings.ai || !settings.ai.enabled) return false;
 
+  if (isBotSender(userState)) return false;
   if (isIgnoredSync(channel, userState['user-id'])) return false;
   if (!isTimerReady(lastAiReply.get(channel) || 0, cfg.cooldownMs)) return false;
   if (!budgetAvailable(cfg.dailyRequestLimit)) return false;
