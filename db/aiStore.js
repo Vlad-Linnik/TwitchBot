@@ -19,6 +19,7 @@ async function ensureInitialized() {
     log: db.collection('AiReplyLog'),
     ignored: db.collection('AiIgnoredUsers'),
     memory: db.collection('AiChannelMemory'),
+    config: db.collection('AiConfig'),
     sessions: db.collection('StreamSessions'),
     samples: db.collection('StreamViewerSamples'),
   };
@@ -233,6 +234,29 @@ async function forgetFact(channel, key) {
   return Boolean(res.deletedCount);
 }
 
+// Кладёт в AiConfig текст встроенных правил, чтобы панель могла его показать и вернуть.
+//
+// ЕДИНСТВЕННОЕ ПОЛЕ, КОТОРОЕ БОТ ПИШЕТ В ЭТОТ ДОКУМЕНТ - остальное туда пишет сайт. Так сделано
+// потому, что текст живёт в коде бота: держать его вторую копию в репозитории сайта (репозитории
+// не импортируют друг друга) значило бы синхронизировать вручную две страницы прозы, а такая
+// копия расходится молча и обнаруживается только тем, что кнопка «вернуть встроенные» вставляет
+// не то, что на самом деле уходит в запрос. Пишущий один - тот, кому текст принадлежит.
+//
+// Сайт это поле только читает и никогда не сохраняет обратно из формы.
+async function publishBuiltinPrompt(text) {
+  try {
+    const c = await ensureInitialized();
+    await c.config.updateOne(
+      { _id: 'global' },
+      { $set: { builtinSystemPrompt: String(text || '') } },
+      { upsert: true }
+    );
+  } catch (err) {
+    // Не критично: панель просто не покажет встроенный текст, а бот продолжит на нём работать.
+    console.error('[aiStore] publishBuiltinPrompt failed:', err.message);
+  }
+}
+
 // --- journal / memory / budget --------------------------------------------
 
 async function writeLog(row) {
@@ -290,6 +314,7 @@ module.exports = {
   findCachedAnswer,
   cacheAnswer,
   recentAnswers,
+  publishBuiltinPrompt,
   isIgnored,
   listIgnoredKeys,
   ignoreUser,

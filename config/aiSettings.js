@@ -25,6 +25,9 @@ const DEFAULT_AI_CONFIG = {
   channelMemoryMax: 200,
   channelMemoryRecall: 10,
   persona: '',
+  // Правила целиком, если их переписали в панели. Пусто - работают встроенные из
+  // games/aiReply.js: настройка, которую не заполняли, не может означать «без правил».
+  systemPrompt: '',
 };
 
 const CACHE_TTL_MS = 5000;
