@@ -22,7 +22,8 @@ const DEFAULT_AI_CONFIG = {
   memoryPairs: 5,
   memoryTtlDays: 30,
   channelMemoryEnabled: true,
-  channelMemoryMax: 25,
+  channelMemoryMax: 200,
+  channelMemoryRecall: 10,
   persona: '',
 };
 

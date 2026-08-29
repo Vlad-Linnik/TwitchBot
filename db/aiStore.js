@@ -27,6 +27,8 @@ async function ensureInitialized() {
   await Promise.all([
     cols.filter.createIndex({ text: 1 }, { unique: true }),
     cols.cache.createIndex({ channel: 1, text: 1 }, { unique: true }),
+    // Для выборки «о чём этого канала уже спрашивали» - см. recentAnswers ниже.
+    cols.cache.createIndex({ channel: 1, lastHitAt: -1, createdAt: -1 }),
     cols.log.createIndex({ channel: 1, userId: 1, createdAt: -1 }),
     cols.log.createIndex({ createdAt: -1 }),
     cols.ignored.createIndex({ channel: 1, userId: 1 }, { unique: true }),
@@ -94,6 +96,23 @@ async function cacheAnswer(channel, text, answer) {
   );
 }
 
+// Вопросы этого канала, на которые ответ уже был, - для поиска похожего в
+// shared/memoryRecall.js. Не замена findCachedAnswer: тот отдаёт ответ при точном совпадении и
+// без обращения к модели, а это выборка кандидатов для подсказки в промт.
+//
+// Выборка ограничена и упорядочена по последнему обращению, а не по дате создания: кэш растёт
+// без ротации, и при канале с длинной историей читать его целиком на горячем пути нельзя. Строка,
+// к которой обращались недавно, - и есть та, о которой спросят снова.
+async function recentAnswers(channel, limit) {
+  const c = await ensureInitialized();
+  if (!limit) return [];
+  return c.cache
+    .find({ channel }, { projection: { text: 1, answer: 1 } })
+    .sort({ lastHitAt: -1, createdAt: -1 })
+    .limit(limit)
+    .toArray();
+}
+
 // --- ignore list -----------------------------------------------------------
 
 async function isIgnored(channel, userId) {
@@ -157,27 +176,49 @@ async function rememberFact(channel, fact, meta, max) {
         authorUserId: meta.authorUserId || null,
         sourceMessage: meta.sourceMessage || null,
         createdAt: new Date(),
+        // Заводится сразу, чтобы поле было у каждой строки: ротация сортирует по нему, и
+        // отсутствующее значение отправило бы только что записанный факт первым на вылет.
+        lastUsedAt: new Date(),
       },
     },
     { upsert: true }
   );
   const added = Boolean(res.upsertedCount);
 
-  // Rotation drops the oldest bot-written facts only. An admin-written one is a deliberate
-  // statement about the channel and must not be evicted by chat traffic; if the admin puts more
-  // of those in than the ceiling allows, that is their own budget to spend.
+  // Rotation drops the bot-written facts only. An admin-written one is a deliberate statement
+  // about the channel and must not be evicted by chat traffic; if the admin puts more of those in
+  // than the ceiling allows, that is their own budget to spend.
+  //
+  // Вылетает не самый старый, а тот, к которому дольше всего не обращались. Пока в запрос уходила
+  // вся память, эти два порядка совпадали - читались все строки сразу. С отбором по словам
+  // (shared/memoryRecall.js) хранилище больше того, что уходит в промт, и «самый старый» начал бы
+  // выбрасывать как раз тот факт, который спрашивают чаще всего, просто потому что он записан
+  // давно.
   if (added) {
     const total = await c.memory.countDocuments({ channel });
     if (total > max) {
       const stale = await c.memory
         .find({ channel, source: 'ai' }, { projection: { _id: 1 } })
-        .sort({ createdAt: 1 })
+        .sort({ lastUsedAt: 1, createdAt: 1 })
         .limit(total - max)
         .toArray();
       if (stale.length) await c.memory.deleteMany({ _id: { $in: stale.map((d) => d._id) } });
     }
   }
   return added;
+}
+
+// Отмечает, что эти факты сейчас ушли в запрос. Вызывается уже после отправки ответа в чат, вне
+// бюджета времени на ответ, и ошибка здесь не должна ронять разбор ответа модели: испорченный
+// порядок ротации - это неудачно выбранная строка на вылет, а не потеря ответа зрителю.
+async function touchFacts(channel, keys) {
+  if (!keys || !keys.length) return;
+  try {
+    const c = await ensureInitialized();
+    await c.memory.updateMany({ channel, key: { $in: keys } }, { $set: { lastUsedAt: new Date() } });
+  } catch (err) {
+    console.error('[aiStore] touchFacts failed:', err.message);
+  }
 }
 
 async function forgetFact(channel, key) {
@@ -242,11 +283,13 @@ module.exports = {
   addFilterEntry,
   findCachedAnswer,
   cacheAnswer,
+  recentAnswers,
   isIgnored,
   listIgnoredKeys,
   ignoreUser,
   listMemory,
   rememberFact,
+  touchFacts,
   forgetFact,
   writeLog,
   recentExchanges,
