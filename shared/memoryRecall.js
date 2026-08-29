@@ -265,10 +265,32 @@ function findSimilarAnswer(question, rows) {
   return best;
 }
 
+/**
+ * Говорят ли два текста одно и то же. Мера та же, что у поиска похожего вопроса, и константы те
+ * же - другого измеренного порога в этом модуле нет, а заводить второй под ту же задачу значило
+ * бы крутить два числа там, где вопрос один: «это про одно и то же?».
+ *
+ * Нужно, чтобы сравнить два ОТВЕТА. Когда прошлый ответ ушёл в промт подсказкой и модель ответила
+ * тем же самым, это и есть доказательство, что вопрос был тот же, - строгое правило isSameQuestion
+ * его просто не поймало. Разница с вопросами в том, что ответ модель намеренно переформулирует
+ * (так велит промт), поэтому тождества наборов слов тут ждать нельзя и доля общих - единственная
+ * доступная мера.
+ */
+function sameMeaning(a, b) {
+  const as = stemsOf(a).slice(0, MAX_QUERY_STEMS);
+  const bs = stemsOf(b).slice(0, MAX_QUERY_STEMS);
+  if (!as.length || !bs.length) return false;
+  if (isSameQuestion(as, bs)) return true;
+  const { score, matched } = overlap(as, bs);
+  if (matched < SIMILAR_MIN_MATCHED) return false;
+  return (2 * score) / (as.length + bs.length) >= SIMILAR_MIN_RATIO;
+}
+
 module.exports = {
   stemsOf,
   overlap,
   isSameQuestion,
+  sameMeaning,
   factPriority,
   factRoleLabel,
   FACT_PRIORITY,

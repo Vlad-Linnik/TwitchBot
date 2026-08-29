@@ -9,8 +9,8 @@
 // девять вызовов на канал. Утечка чужого ответа в чужой чат стоит дороже.
 //
 // This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog / AiIgnoredUsers /
-// AiChannelMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js) but the bot is
-// what writes them at runtime. Channel keys carry the leading '#', the same convention as every
+// AiChannelMemory / AiUserMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js)
+// but the bot is what writes them at runtime. Channel keys carry the leading '#', the same convention as every
 // other chat-stat collection in this database.
 const { connect } = require('./db.js');
 const { aiTextKey } = require('../shared/aiTextKey.js');
@@ -27,6 +27,7 @@ async function ensureInitialized() {
     log: db.collection('AiReplyLog'),
     ignored: db.collection('AiIgnoredUsers'),
     memory: db.collection('AiChannelMemory'),
+    userMemory: db.collection('AiUserMemory'),
     config: db.collection('AiConfig'),
     sessions: db.collection('StreamSessions'),
     samples: db.collection('StreamViewerSamples'),
@@ -44,6 +45,8 @@ async function ensureInitialized() {
     cols.ignored.createIndex({ channel: 1, userId: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, key: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
+    cols.userMemory.createIndex({ channel: 1, userId: 1, key: 1 }, { unique: true }),
+    cols.userMemory.createIndex({ channel: 1, userId: 1, createdAt: 1 }),
   ]);
   return cols;
 }
@@ -256,6 +259,134 @@ async function forgetFact(channel, key) {
   return Boolean(res.deletedCount);
 }
 
+// --- viewer memory ---------------------------------------------------------
+
+// Что бот знает про конкретных людей в чате. Отдельная коллекция, а не признак у строки в памяти
+// канала, потому что у этих фактов есть адресат: факт про канал нужен в каждом запросе по каналу,
+// факт про Васю - ровно тогда, когда говорит Вася или когда про него спросили. Одна таблица на
+// двоих означала бы либо возить память обо всех зрителях в каждом запросе, либо завести в ней поле
+// «про кого», то есть ту же коллекцию, только без индекса под неё.
+//
+// Ключ - {channel, userId, key}, а не логин: ники на Twitch меняются, id нет, а строка живёт долго.
+// Логин лежит рядом и переписывается при каждой записи - в промте и в админке человек узнаётся по
+// нику, и показать устаревший хуже, чем не показать никакого.
+//
+// ПРО КОГО МОЖНО ЗАПИСАТЬ. Про любого, кто есть в текущем разговоре, а не только про самого
+// говорящего: рассказывают в чате чаще про соседа, чем про себя. Плата за это - подставные факты,
+// и именно поэтому у строки всегда сохранены автор (authorLogin/authorUserId/authorRole) и само
+// сообщение: адресат и источник тут разные люди, и без источника разобрать спорную строку в
+// админке невозможно. Вес автора (factPriority) здесь значит больше, чем в памяти канала, - там
+// строки почти всегда про то же, что и говорящий, а тут слово стримера про зрителя и слово
+// случайного зрителя про него же лежат рядом.
+
+// Факты про перечисленных людей, старые сначала - тем же порядком они нумеруются в промте.
+//
+// Потолок применяется НА ЧЕЛОВЕКА и считается по строкам бота: написанные админом уходят в запрос
+// всегда и не вытесняются - то же правило, что и в памяти канала, и по той же причине (ceiling,
+// который не вытесняет, но считает, молча удаляет чужие строки в момент записи).
+async function listUserMemory(channel, userIds, perUser) {
+  const c = await ensureInitialized();
+  const ids = (userIds || []).map(String).filter(Boolean);
+  if (!ids.length) return [];
+  const rows = await c.userMemory.find({ channel, userId: { $in: ids } }).toArray();
+
+  // Обрезка на чтении - страховка на случай, когда потолок в настройках только что понизили:
+  // ротация на записи об этом ещё не знает. Лишними считаются те строки бота, к которым дольше
+  // всего не обращались, - тот же порядок, по которому их вытесняет ротация ниже.
+  const kept = [];
+  const byUser = new Map();
+  for (const row of rows) {
+    if (row.source !== 'ai') {
+      kept.push(row);
+      continue;
+    }
+    if (!byUser.has(row.userId)) byUser.set(row.userId, []);
+    byUser.get(row.userId).push(row);
+  }
+  for (const list of byUser.values()) {
+    list.sort((a, b) => (b.lastUsedAt || b.createdAt || 0).valueOf() - (a.lastUsedAt || a.createdAt || 0).valueOf());
+    for (const row of list.slice(0, Math.max(perUser || 0, 0))) kept.push(row);
+  }
+  return kept.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+}
+
+// Returns true when the fact was new. subject = { userId, login } - про кого факт; meta - с чьих
+// слов он записан. Это разные люди в общем случае, и путать их нельзя ни в одном из трёх мест,
+// где строка потом читается.
+async function rememberUserFact(channel, subject, fact, meta, max) {
+  const c = await ensureInitialized();
+  const key = aiTextKey(fact);
+  const userId = String(subject && subject.userId ? subject.userId : '');
+  if (!key || !userId) return false;
+  // Потолок в ноль означает «не запоминать», и отказать надо здесь, до записи: иначе строка
+  // заводится, тут же вычищается ротацией, а в журнал уходит «запомнил» про факт, которого в
+  // памяти никогда не было.
+  if (!max || max < 1) return false;
+
+  const res = await c.userMemory.updateOne(
+    { channel, userId, key },
+    {
+      // Логин обновляется и у уже записанной строки: человек мог смениться ником с тех пор, как
+      // факт про него записали, а узнают его в админке именно по нику.
+      $set: { login: String(subject.login || '').toLowerCase() },
+      $setOnInsert: {
+        channel,
+        userId,
+        key,
+        fact: String(fact),
+        source: 'ai',
+        authorLogin: meta.authorLogin || null,
+        authorUserId: meta.authorUserId || null,
+        authorRole: meta.authorRole || 'viewer',
+        sourceMessage: meta.sourceMessage || null,
+        createdAt: new Date(),
+        lastUsedAt: new Date(),
+      },
+    },
+    { upsert: true }
+  );
+  const added = Boolean(res.upsertedCount);
+
+  if (added) {
+    const total = await c.userMemory.countDocuments({ channel, userId, source: 'ai' });
+    if (total > max) {
+      const rows = await c.userMemory
+        .find({ channel, userId, source: 'ai' }, { projection: { _id: 1, authorRole: 1, source: 1, lastUsedAt: 1, createdAt: 1 } })
+        .toArray();
+      rows.sort((a, b) => {
+        const pa = factPriority(a);
+        const pb = factPriority(b);
+        if (pa !== pb) return pa - pb;
+        const ta = (a.lastUsedAt || a.createdAt || 0).valueOf();
+        const tb = (b.lastUsedAt || b.createdAt || 0).valueOf();
+        return ta - tb;
+      });
+      const stale = rows.slice(0, total - max);
+      if (stale.length) await c.userMemory.deleteMany({ _id: { $in: stale.map((d) => d._id) } });
+    }
+  }
+  return added;
+}
+
+// По _id, а не по ключу: ключ уникален внутри одного человека, и один и тот же текст про двоих -
+// это две законные строки. Как и у памяти канала, вызывается после отправки ответа и не роняет
+// разбор ответа модели.
+async function touchUserFacts(ids) {
+  if (!ids || !ids.length) return;
+  try {
+    const c = await ensureInitialized();
+    await c.userMemory.updateMany({ _id: { $in: ids } }, { $set: { lastUsedAt: new Date() } });
+  } catch (err) {
+    console.error('[aiStore] touchUserFacts failed:', err.message);
+  }
+}
+
+async function forgetUserFact(channel, userId, key) {
+  const c = await ensureInitialized();
+  const res = await c.userMemory.deleteOne({ channel, userId: String(userId), key: String(key) });
+  return Boolean(res.deletedCount);
+}
+
 // Кладёт в AiConfig текст встроенных правил, чтобы панель могла его показать и вернуть.
 //
 // ЕДИНСТВЕННОЕ ПОЛЕ, КОТОРОЕ БОТ ПИШЕТ В ЭТОТ ДОКУМЕНТ - остальное туда пишет сайт. Так сделано
@@ -355,6 +486,10 @@ module.exports = {
   rememberFact,
   touchFacts,
   forgetFact,
+  listUserMemory,
+  rememberUserFact,
+  touchUserFacts,
+  forgetUserFact,
   writeLog,
   timesAsked,
   recentExchanges,

@@ -201,7 +201,9 @@ async function bootstrap() {
         customCommands.recordChatMessage(channel);
         // Rolling last-N-lines buffer games/aiReply.js reads for context - and, just as
         // importantly, for the list of logins the model is allowed to put an "@" in front of.
-        aiReply.recordChatLine(channel, userState["username"], message);
+        // The id goes in too: a fact the bot learns about a viewer is filed by id, and a
+        // login seen only in this buffer cannot be resolved to one after the fact.
+        aiReply.recordChatLine(channel, userState["username"], message, userState["user-id"]);
       }
 
       // spam protection
