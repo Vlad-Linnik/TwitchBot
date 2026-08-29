@@ -50,6 +50,37 @@ for (const word of STOPWORDS) {
   if (s) STOPWORD_STEMS.add(s);
 }
 
+// --- вес факта по автору ----------------------------------------------------------------------
+//
+// Учить бота может кто угодно - это решение владельца, и оно не про то, кого пускать, а про то,
+// сколько стоит чьё слово. Написанное админом руками и сказанное самим стримером про свой канал
+// весит больше слова случайного зрителя, и вес работает в трёх местах сразу: в промте у факта
+// видна его роль (при противоречии модель предпочтёт авторитетный), при отборе под вопрос он
+// идёт выше при равном совпадении, при переполнении первым вылетает факт от зрителя.
+//
+// Ноль для зрителя - не «не верим», а «при прочих равных уступает». Строки, записанные до
+// появления этого поля, попадают сюда же: у них автора не спрашивали.
+const FACT_PRIORITY = { admin: 3, broadcaster: 3, moderator: 2, vip: 1, viewer: 0 };
+const FACT_ROLE_LABELS = {
+  admin: 'добавлено вручную',
+  broadcaster: 'со слов стримера',
+  moderator: 'со слов модератора',
+  vip: 'со слов VIP',
+  viewer: 'со слов зрителя',
+};
+
+function factPriority(row) {
+  if (!row) return 0;
+  if (row.source === 'admin') return FACT_PRIORITY.admin;
+  return FACT_PRIORITY[row.authorRole] ?? FACT_PRIORITY.viewer;
+}
+
+function factRoleLabel(row) {
+  if (!row) return FACT_ROLE_LABELS.viewer;
+  if (row.source === 'admin') return FACT_ROLE_LABELS.admin;
+  return FACT_ROLE_LABELS[row.authorRole] || FACT_ROLE_LABELS.viewer;
+}
+
 /** Значимые стемы текста, без повторов, в порядке появления. */
 function stemsOf(text) {
   const out = [];
@@ -132,6 +163,7 @@ function rankFacts(question, rows, limit) {
       row,
       index,
       matched,
+      priority: factPriority(row),
       weight: score / Math.sqrt(Math.max(docStems.length, 1)),
     };
   });
@@ -139,8 +171,12 @@ function rankFacts(question, rows, limit) {
   // Сначала то, что вопрос действительно задел, потом добивка свежими. Добивка не бесплатная
   // роскошь: в запрос всё равно уходит ровно limit фактов, а свежий факт - лучшее, что можно
   // положить в оставшееся место, когда вопрос не совпал ни с чем.
+  // Сначала попадание в вопрос, и только при равном попадании - вес автора. Наоборот было бы
+  // хуже: авторитетный, но не относящийся к делу факт вытеснил бы точный ответ на заданный
+  // вопрос. Вес решает спор между одинаково подходящими, а не подменяет собой подходящесть.
   scored.sort((a, b) => {
     if (b.weight !== a.weight) return b.weight - a.weight;
+    if (b.priority !== a.priority) return b.priority - a.priority;
     return b.index - a.index;
   });
 
@@ -233,6 +269,9 @@ module.exports = {
   stemsOf,
   overlap,
   isSameQuestion,
+  factPriority,
+  factRoleLabel,
+  FACT_PRIORITY,
   rankFacts,
   findSimilarAnswer,
   MIN_STEM_LENGTH,

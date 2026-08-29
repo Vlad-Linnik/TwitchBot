@@ -1,12 +1,20 @@
 // Bot-side Mongo access for the AI mention replies: the two lookaside tables checked before any
 // API call, the per-call journal, the permanent ignore list, and the channel memory.
 //
+// AiFilter - ПО КАНАЛАМ, а не общий на всех, как было раньше. Заготовку в него пишет сама модель
+// (вердикт filter), и пока таблица была общей, придуманный ею ответ начинал выдаваться во всех
+// каналах сразу и навсегда - без чьего-либо просмотра. Общей она была ради экономии: «привет»
+// значит одно и то же везде, и заново учить каждый канал казалось расточительным. Замер это не
+// подтвердил - за месяцы работы в таблице накопилось девять строк, то есть «переучивание» стоит
+// девять вызовов на канал. Утечка чужого ответа в чужой чат стоит дороже.
+//
 // This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog / AiIgnoredUsers /
 // AiChannelMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js) but the bot is
 // what writes them at runtime. Channel keys carry the leading '#', the same convention as every
 // other chat-stat collection in this database.
 const { connect } = require('./db.js');
 const { aiTextKey } = require('../shared/aiTextKey.js');
+const { factPriority } = require('../shared/memoryRecall.js');
 
 let cols = null;
 
@@ -26,12 +34,13 @@ async function ensureInitialized() {
   // Indexes are created by whichever side touches the collection first; both sides declare the
   // same ones, and createIndex is idempotent.
   await Promise.all([
-    cols.filter.createIndex({ text: 1 }, { unique: true }),
+    cols.filter.createIndex({ channel: 1, text: 1 }, { unique: true }),
     cols.cache.createIndex({ channel: 1, text: 1 }, { unique: true }),
     // Для выборки «о чём этого канала уже спрашивали» - см. recentAnswers ниже.
     cols.cache.createIndex({ channel: 1, lastHitAt: -1, createdAt: -1 }),
     cols.log.createIndex({ channel: 1, userId: 1, createdAt: -1 }),
     cols.log.createIndex({ createdAt: -1 }),
+    cols.log.createIndex({ channel: 1, questionKey: 1 }),
     cols.ignored.createIndex({ channel: 1, userId: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, key: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
@@ -41,12 +50,12 @@ async function ensureInitialized() {
 
 // --- lookaside tables ------------------------------------------------------
 
-async function findFilterAnswer(text) {
+async function findFilterAnswer(channel, text) {
   const c = await ensureInitialized();
   const key = aiTextKey(text);
   if (!key) return null;
   const doc = await c.filter.findOneAndUpdate(
-    { text: key },
+    { channel, text: key },
     { $inc: { hits: 1 }, $set: { lastHitAt: new Date() } },
     { returnDocument: 'after' }
   );
@@ -56,15 +65,15 @@ async function findFilterAnswer(text) {
   return found ? found.answer : null;
 }
 
-async function addFilterEntry(text, answer) {
+async function addFilterEntry(channel, text, answer) {
   const c = await ensureInitialized();
   const key = aiTextKey(text);
   if (!key) return;
   await c.filter.updateOne(
-    { text: key },
+    { channel, text: key },
     {
       $set: { answer: String(answer || '') },
-      $setOnInsert: { text: key, source: 'ai', hits: 0, lastHitAt: null, createdAt: new Date() },
+      $setOnInsert: { channel, text: key, source: 'ai', hits: 0, lastHitAt: null, createdAt: new Date() },
     },
     { upsert: true }
   );
@@ -179,6 +188,9 @@ async function rememberFact(channel, fact, meta, max) {
         source: 'ai',
         authorLogin: meta.authorLogin || null,
         authorUserId: meta.authorUserId || null,
+        // Чей это факт. Учить бота может кто угодно, но слово стримера весит больше слова
+        // случайного зрителя - см. factPriority в shared/memoryRecall.js.
+        authorRole: meta.authorRole || 'viewer',
         sourceMessage: meta.sourceMessage || null,
         createdAt: new Date(),
         // Заводится сразу, чтобы поле было у каждой строки: ротация сортирует по нему, и
@@ -204,11 +216,21 @@ async function rememberFact(channel, fact, meta, max) {
   if (added) {
     const total = await c.memory.countDocuments({ channel, source: 'ai' });
     if (total > max) {
-      const stale = await c.memory
-        .find({ channel, source: 'ai' }, { projection: { _id: 1 } })
-        .sort({ lastUsedAt: 1, createdAt: 1 })
-        .limit(total - max)
+      // Вылетают сначала факты от менее авторитетных авторов, и уже внутри одного веса - те, к
+      // которым дольше всего не обращались. Сортировать этим в Mongo нельзя (вес - не поле, а
+      // правило), поэтому строки читаются и упорядочиваются здесь; их сотни, не миллионы.
+      const rows = await c.memory
+        .find({ channel, source: 'ai' }, { projection: { _id: 1, authorRole: 1, source: 1, lastUsedAt: 1, createdAt: 1 } })
         .toArray();
+      rows.sort((a, b) => {
+        const pa = factPriority(a);
+        const pb = factPriority(b);
+        if (pa !== pb) return pa - pb;
+        const ta = (a.lastUsedAt || a.createdAt || 0).valueOf();
+        const tb = (b.lastUsedAt || b.createdAt || 0).valueOf();
+        return ta - tb;
+      });
+      const stale = rows.slice(0, total - max);
       if (stale.length) await c.memory.deleteMany({ _id: { $in: stale.map((d) => d._id) } });
     }
   }
@@ -261,7 +283,18 @@ async function publishBuiltinPrompt(text) {
 
 async function writeLog(row) {
   const c = await ensureInitialized();
-  await c.log.insertOne({ ...row, createdAt: new Date() });
+  // questionKey кладётся рядом с текстом вопроса, чтобы «спрашивали ли это раньше» было одним
+  // индексным запросом, а не перебором журнала. Ключ тот же, по которому ищет кэш.
+  await c.log.insertOne({ ...row, questionKey: aiTextKey(row.question), createdAt: new Date() });
+}
+
+// Сколько раз этот вопрос уже задавали в этом канале. Нужен, чтобы кэшировать ответ со второго
+// обращения, а не с первого: см. games/aiReply.js.
+async function timesAsked(channel, question) {
+  const c = await ensureInitialized();
+  const key = aiTextKey(question);
+  if (!key) return 0;
+  return c.log.countDocuments({ channel, questionKey: key });
 }
 
 // The last N exchanges this viewer had with the bot in this channel, oldest first so the model
@@ -323,6 +356,7 @@ module.exports = {
   touchFacts,
   forgetFact,
   writeLog,
+  timesAsked,
   recentExchanges,
   countBilledSince,
   streamCard,

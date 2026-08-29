@@ -12,8 +12,10 @@
 //     -> model -> sanitize -> reply
 //
 // The two lookaside tables in the middle are what keeps this affordable. They are checked before
-// the API is ever contacted; the filter is global (a greeting means the same thing everywhere)
-// and the answer cache is per channel (the right answer to "what are we playing" is not).
+// the API is ever contacted, and обе - по каналам. Фильтр когда-то был общим на все каналы
+// («привет» значит одно и то же везде), но заготовки в него пишет сама модель, и общая таблица
+// означала, что придуманный ею ответ выдаётся во всех чатах сразу и навсегда. Экономия от общей
+// таблицы оказалась мнимой: девять строк за всё время.
 //
 // THE CALL IS DETACHED. tryAnswer() decides synchronously whether it will take the message and
 // returns immediately; everything after that runs on its own. Making the mention path async
@@ -425,12 +427,26 @@ function isBotSender(userState) {
 // стримера от случайного зрителя: любая просьба «запомни» выглядела одинаково, а безопасным
 // поведением при неизвестном авторе было не запоминать ничего. Роль стоит несколько токенов и
 // возвращает решению основание.
-function describeRole(userState) {
+// Машинный ключ роли. Он же уезжает в строку памяти: чей это факт - решает, насколько он весит
+// при отборе, кто вылетит первым при переполнении и чьему слову модель поверит при противоречии.
+// Учить бота по-прежнему может кто угодно, но не всякое слово стоит одинаково.
+function roleKey(userState) {
   const badges = userState['badges'] || {};
-  if ('broadcaster' in badges) return 'стример этого канала';
-  if (isMod(userState)) return 'модератор канала';
-  if ('vip' in badges) return 'VIP канала';
-  return 'зритель';
+  if ('broadcaster' in badges) return 'broadcaster';
+  if (isMod(userState)) return 'moderator';
+  if ('vip' in badges) return 'vip';
+  return 'viewer';
+}
+
+const ROLE_LABELS = {
+  broadcaster: 'стример этого канала',
+  moderator: 'модератор канала',
+  vip: 'VIP канала',
+  viewer: 'зритель',
+};
+
+function describeRole(userState) {
+  return ROLE_LABELS[roleKey(userState)];
 }
 
 function isProtected(userState) {
@@ -441,8 +457,23 @@ function isProtected(userState) {
 
 // --- prompt -------------------------------------------------------------------------------------
 
-function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, lines, memory, facts, similar, allowed }) {
-  const parts = ['Канал: ' + channel];
+// Текущий момент словами. Без этого бот не мог ответить даже «какая сегодня дата» - вопрос
+// встречался в чате, и ответом было «не знаю, в чате не указано». Часовой пояс называется явно,
+// чтобы модель не пересчитывала его наугад.
+function describeNow(at = new Date()) {
+  const date = at.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const time = at.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  let zone = '';
+  try {
+    zone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch (err) {
+    zone = '';
+  }
+  return date + ', ' + time + (zone ? ' (' + zone + ')' : '');
+}
+
+function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, lines, memory, facts, similar, allowed, now }) {
+  const parts = ['Канал: ' + channel, 'Сейчас: ' + now];
 
   if (card.live) {
     const bits = ['в эфире ' + Math.floor(card.uptimeMinutes / 60) + ' ч ' + (card.uptimeMinutes % 60) + ' мин'];
@@ -459,7 +490,13 @@ function buildUserContent({ channel, question, login, role, card, cheatsheet, to
   // as one of these numbers, so the list the model saw is the list the number is resolved against.
   if (facts.length) {
     parts.push('Память канала (что ты запомнил раньше, подходящее к этому вопросу):');
-    facts.forEach((f, i) => parts.push('  ' + (i + 1) + ') ' + f.fact));
+    // У каждого факта видно, с чьих слов он записан. Учить бота может кто угодно, поэтому при
+    // противоречии решать приходится по источнику: слово стримера про свой канал весит больше
+    // слова случайного зрителя. Без этой подписи модель видит два взаимоисключающих факта и
+    // выбирает между ними наугад.
+    facts.forEach((f, i) =>
+      parts.push('  ' + (i + 1) + ') ' + f.fact + '  [' + memoryRecall.factRoleLabel(f) + ']')
+    );
   }
 
   if (tone) parts.push('Тон ответов на этом канале: ' + tone);
@@ -485,6 +522,30 @@ function buildUserContent({ channel, question, login, role, card, cheatsheet, to
 
   parts.push('Вопрос от ' + login + ' (' + role + '): ' + question);
   return parts.join('\n');
+}
+
+// Значения, которые верны только в момент запроса: они уходят в промт, и ответ, который их
+// процитировал, завтра будет неправдой. Кэшировать такой ответ нельзя, что бы модель ни написала
+// в поле cacheable - на проде уже лежит вечная заготовка «сейчас 2024 или 2025 год», записанная
+// тогда, когда времени в промте ещё не было вовсе.
+//
+// Проверка идёт по СОВПАДЕНИЮ ТЕКСТА, а не по догадке о теме вопроса: если в ответе стоит то же
+// время, та же дата или то же число зрителей, что мы сами и подставили, значит ответ выведен из
+// них. Однозначные числа не берём - они совпадают со всем подряд.
+function volatileValues(card, at = new Date()) {
+  const out = [
+    at.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+    String(at.getFullYear()),
+    at.getDate() + ' ' + at.toLocaleDateString('ru-RU', { month: 'long' }),
+  ];
+  if (card && card.viewers >= 10) out.push(String(card.viewers));
+  if (card && card.uptimeMinutes >= 60) out.push(String(Math.floor(card.uptimeMinutes / 60)) + ' ч');
+  return out;
+}
+
+function quotesVolatile(text, values) {
+  const t = String(text || '');
+  return values.some((v) => v && t.includes(v));
 }
 
 // --- the path -----------------------------------------------------------------------------------
@@ -538,7 +599,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
   };
 
   // 1. The global filter: messages already judged not worth an API call.
-  const canned = await aiStore.findFilterAnswer(question);
+  const canned = await aiStore.findFilterAnswer(channel, question);
   if (canned) {
     const sent = send(canned);
     await aiStore.writeLog({ ...base, answer: canned, source: 'filter', verdict: 'normal', billed: false, sent });
@@ -599,6 +660,9 @@ async function answer(client, channel, userState, message, cfg, settings, script
 
   const channelEntry = botInitInfo.channels[channel.replace('#', '')];
   const lines = (recentChat.get(channel) || []).slice();
+  // Один момент времени на весь запрос: тот же, что уйдёт в промт, сверяется потом с ответом.
+  const askedAt = new Date();
+  const nowText = describeNow(askedAt);
   const [card, memory, stored] = await Promise.all([
     channelEntry ? aiStore.streamCard(channelEntry.id) : Promise.resolve({ live: false }),
     aiStore.recentExchanges(channel, base.userId, cfg.memoryPairs),
@@ -645,6 +709,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
             channel,
             question,
             login,
+            now: nowText,
             role: describeRole(userState),
             card,
             cheatsheet: settings.ai.cheatsheet,
@@ -724,14 +789,31 @@ async function answer(client, channel, userState, message, cfg, settings, script
     }
   } else if (verdict === 'filter') {
     // The answer it just gave becomes the canned one, so the same message never costs again.
-    await aiStore.addFilterEntry(question, reply);
+    // Фильтр глобальный и вечный, поэтому сиюминутному там не место тем более, чем в кэше.
+    if (!quotesVolatile(reply, volatileValues(card, askedAt))) {
+      await aiStore.addFilterEntry(channel, question, reply);
+    }
   } else if (verdict === 'ignore_user') {
     await aiStore.ignoreUser(channel, base.userId, login, reason);
     ignoredKeys.add(ignoreKey(channel, base.userId));
   }
 
+  // Кэшируется теперь не всё, что модель назвала долговечным. Два дополнительных условия, и оба
+  // взялись из замеров на проде:
+  //
+  // 1. Ответ не должен цитировать сиюминутное. Модель пометила `eternal` 162 ответа из 201 - она
+  //    применяет метку слишком щедро, и с появлением даты в промте вечных «сейчас 2026 год» стало
+  //    бы много. Здесь решает не её оценка, а совпадение текста с тем, что мы сами подставили.
+  //
+  // 2. Вопрос должен быть задан не в первый раз. Кэш из 153 строк сработал за всё время 2 раза
+  //    (1%): он пополнялся почти на каждом вызове и не ловил ничего, потому что вопросы в чате
+  //    почти все уникальные. Кэш со второго обращения - это запись того, что действительно
+  //    повторяется, а не свалка всего сказанного.
   if (verdict === 'normal' && out && out.cacheable === 'eternal' && reply) {
-    await aiStore.cacheAnswer(channel, question, reply);
+    const asked = await aiStore.timesAsked(channel, question);
+    if (asked >= 1 && !quotesVolatile(reply, volatileValues(card, askedAt))) {
+      await aiStore.cacheAnswer(channel, question, reply);
+    }
   }
 
   // Отметка «эти факты сейчас пригодились» - ею ротация в db/aiStore.js выбирает, что вытеснить,
@@ -750,7 +832,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
       const added = await aiStore.rememberFact(
         channel,
         fact,
-        { authorLogin: login, authorUserId: base.userId, sourceMessage: question },
+        { authorLogin: login, authorUserId: base.userId, authorRole: roleKey(userState), sourceMessage: question },
         cfg.channelMemoryMax
       );
       if (added) remembered = fact;
