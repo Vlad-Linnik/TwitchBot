@@ -101,19 +101,28 @@ function directMsgCheck(client, channel, userState, message) {
         return 1;
       }
     }
+    // Хвост, который ответил бы, не будь пути ИИ: случайное «да/нет» на вопрос со своим
+    // выключателем и кулдауном, а если оно не сработало - дежурная отговорка со своими.
+    //
+    // Он вынесен в функцию и передаётся в tryAnswer, потому что путь ИИ решает, берёт ли он
+    // сообщение, СИНХРОННО, а что ответить ему нечем (кончился дневной лимит, упал запрос)
+    // выясняется уже потом и в отрыве от этой цепочки. Раньше в таком случае он слал отговорку
+    // сам, минуя и «да/нет», и оба выключателя с кулдаунами - то есть зритель получал не то, что
+    // получил бы без ИИ. Теперь исход один и тот же, кто бы до него ни дошёл.
+    const scripted = () => {
+      if (question(client, channel, userState, message)) return;
+      const settings = channelSettings.getSettings(channel);
+      if (settings.commands.directmsg.enabled && isTimerReady(lastDirectMSG.get(channel) || 0, settings.commands.directmsg.cooldownMs)){
+        client.say(channel, settings.responses.busy.random(), userState["id"]);
+        lastDirectMSG.set(channel, Date.now());
+      }
+    };
     // Returns true the moment it takes responsibility for a reply; the API call itself runs
     // detached (see games/aiReply.js), so nothing below waits on it.
-    if (aiReply.tryAnswer(client, channel, userState, message)) {
+    if (aiReply.tryAnswer(client, channel, userState, message, scripted)) {
       return 1;
     }
-    if (question(client, channel, userState, message)) {
-      return 1;
-    }
-    const settings = channelSettings.getSettings(channel);
-    if (settings.commands.directmsg.enabled && isTimerReady(lastDirectMSG.get(channel) || 0, settings.commands.directmsg.cooldownMs)){
-      client.say(channel, settings.responses.busy.random(), userState["id"]);
-      lastDirectMSG.set(channel, Date.now());
-    }
+    scripted();
     return 1;
   }
   return 0;

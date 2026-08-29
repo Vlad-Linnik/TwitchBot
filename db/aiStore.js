@@ -164,6 +164,10 @@ async function rememberFact(channel, fact, meta, max) {
   const c = await ensureInitialized();
   const key = aiTextKey(fact);
   if (!key) return false;
+  // Потолок в ноль означает «не запоминать», и отказ должен произойти ЗДЕСЬ. Раньше строка
+  // записывалась и тут же вычищалась ротацией, а вызывающий получал true и писал в журнал
+  // «запомнил такой-то факт» - журнал наполнялся записями, которых в памяти никогда не было.
+  if (!max || max < 1) return false;
   const res = await c.memory.updateOne(
     { channel, key },
     {
@@ -185,9 +189,11 @@ async function rememberFact(channel, fact, meta, max) {
   );
   const added = Boolean(res.upsertedCount);
 
-  // Rotation drops the bot-written facts only. An admin-written one is a deliberate statement
-  // about the channel and must not be evicted by chat traffic; if the admin puts more of those in
-  // than the ceiling allows, that is their own budget to spend.
+  // Потолок считается ПО СТРОКАМ БОТА, а не по всем. Строки, написанные админом, - отдельный
+  // список: они не вытесняются и уходят в запрос всегда. Пока в счёт входили и они, достаточно
+  // было написать руками столько фактов, сколько стоит в потолке, чтобы каждый факт бота
+  // удалялся ровно в тот момент, когда был записан, - навсегда и молча, с записью «запомнил» в
+  // журнале.
   //
   // Вылетает не самый старый, а тот, к которому дольше всего не обращались. Пока в запрос уходила
   // вся память, эти два порядка совпадали - читались все строки сразу. С отбором по словам
@@ -195,7 +201,7 @@ async function rememberFact(channel, fact, meta, max) {
   // выбрасывать как раз тот факт, который спрашивают чаще всего, просто потому что он записан
   // давно.
   if (added) {
-    const total = await c.memory.countDocuments({ channel });
+    const total = await c.memory.countDocuments({ channel, source: 'ai' });
     if (total > max) {
       const stale = await c.memory
         .find({ channel, source: 'ai' }, { projection: { _id: 1 } })

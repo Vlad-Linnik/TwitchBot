@@ -242,6 +242,13 @@ let billedToday = 0;
 let budgetDay = null;
 let budgetCheckedAt = 0;
 let budgetLoading = null;
+// Известен ли расход за сегодня. Пока нет - тратить нельзя, и это главное свойство здесь.
+// Счётчик стартует с нуля, а обновляется фоном (решение о том, отвечать ли, принимается
+// синхронно и ждать базу не может), поэтому сразу после перезапуска «ноль потрачено» означало
+// не «лимит свободен», а «ещё не спрашивали». Один вызов за перезапуск проходил мимо уже
+// исчерпанного лимита. То же правило, что у config/aiSettings.js: недоступная величина не может
+// значить «трать по умолчанию».
+let budgetKnown = false;
 
 function startOfToday() {
   const d = new Date();
@@ -257,7 +264,10 @@ function refreshBudget() {
       billedToday = await aiStore.countBilledSince(day);
       budgetDay = day.getTime();
       budgetCheckedAt = Date.now();
+      budgetKnown = true;
     } catch (err) {
+      // budgetKnown НЕ сбрасывается в true: единственный тормоз расхода - этот счётчик, и
+      // недоступная база не должна снимать лимит. Следующее же чтение попробует снова.
       console.error('[aiReply] budget refresh failed:', err.message);
     } finally {
       budgetLoading = null;
@@ -270,11 +280,26 @@ function refreshBudget() {
 // every billed call, so the window between refreshes can overshoot the limit by at most the number
 // of calls made inside it - which the per-channel cooldown already keeps to a handful.
 function budgetAvailable(limit) {
-  if (budgetDay !== startOfToday().getTime() || Date.now() - budgetCheckedAt > BUDGET_RECHECK_MS) {
+  const today = startOfToday().getTime();
+  // Наступили новые сутки - вчерашнее число не «слегка устарело», оно относится к другому дню, и
+  // считать по нему нельзя. Обычная же плановая сверка счётчик не обнуляет: он остаётся верным с
+  // точностью до вызовов, сделанных с прошлого чтения, и отказывать на время каждого чтения
+  // значило бы замолкать раз в полминуты на ровном месте.
+  if (budgetDay !== today) {
+    budgetKnown = false;
+    refreshBudget();
+  } else if (Date.now() - budgetCheckedAt > BUDGET_RECHECK_MS) {
     refreshBudget();
   }
+  if (!budgetKnown) return false;
   return billedToday < limit;
 }
+
+// Первое чтение запускается сразу при загрузке модуля, а не по первому упоминанию: пока расход за
+// сегодня неизвестен, отвечать нельзя, и без этого первый же обратившийся после перезапуска
+// получал бы вместо ответа заготовку. Обращения к botInitInfo здесь нет, так что порядок require
+// в index.js это не трогает; если база ещё не поднялась, следующее чтение просто повторит попытку.
+refreshBudget();
 
 // --- text handling ------------------------------------------------------------------------------
 
@@ -421,7 +446,7 @@ function buildUserContent({ channel, question, login, role, card, cheatsheet, to
 // Synchronous eligibility check. Returning true means "this message is mine, a reply is on its
 // way" - the caller must not fall through to the scripted replies. Everything expensive happens
 // after the caller has already returned.
-function tryAnswer(client, channel, userState, message) {
+function tryAnswer(client, channel, userState, message, scripted) {
   const cfg = aiSettings.get();
   if (!cfg.enabled) return false;
   if (!process.env.ANTHROPIC_API_KEY) return false;
@@ -432,18 +457,28 @@ function tryAnswer(client, channel, userState, message) {
   if (isBotSender(userState)) return false;
   if (isIgnoredSync(channel, userState['user-id'])) return false;
   if (!isTimerReady(lastAiReply.get(channel) || 0, cfg.cooldownMs)) return false;
-  if (!budgetAvailable(cfg.dailyRequestLimit)) return false;
 
+  // Дневной лимит здесь НЕ проверяется, хотя раньше проверялся. Он ограничивает трату, а первые
+  // три ступени пути (фильтр, кэш, тот же вопрос другими словами) не тратят ничего - отказывать
+  // на входе значило бы молчать в ответ на вопрос, ответ на который уже лежит готовым. Проверка
+  // стоит ниже, ровно перед вызовом модели, то есть перед единственным местом, где тратятся
+  // деньги. Узнать заранее, найдётся ли готовый ответ, нельзя: это чтение из базы, а решение о
+  // том, берём ли мы сообщение, синхронное.
+  //
   // Claimed before the async work starts, so a burst of mentions in the same second produces one
   // answer rather than one per message.
   lastAiReply.set(channel, Date.now());
-  answer(client, channel, userState, message, cfg, settings).catch((err) =>
+  answer(client, channel, userState, message, cfg, settings, scripted).catch((err) =>
     console.error('[aiReply] unhandled failure:', describeError(err))
   );
   return true;
 }
 
-async function answer(client, channel, userState, message, cfg, settings) {
+async function answer(client, channel, userState, message, cfg, settings, scripted) {
+  // Сообщение уже заявлено как наше, вернуть его в цепочку commands/msgHandle.js нельзя - она
+  // давно отработала. Поэтому хвост цепочки передан сюда функцией и вызывается там, где нам
+  // сказать нечего.
+  const handOff = typeof scripted === 'function' ? scripted : () => {};
   const receivedAt = Date.now();
   const question = stripBotMention(message);
   const login = userState['username'];
@@ -494,6 +529,24 @@ async function answer(client, channel, userState, message, cfg, settings) {
       billed: false,
       sent,
       similarTo: similar.text,
+    });
+    return;
+  }
+
+  // Дальше начинается платная часть, и только здесь дневной лимит вправе остановить ответ.
+  // Готового ответа не нашлось, значит сказать нам нечего - сообщение возвращается тому хвосту
+  // цепочки, который ответил бы на него без ИИ. Строка в журнале пишется всё равно: пока лимит
+  // упирается, это единственное место, где видно, скольким он отказал, - то есть основание
+  // поднять его или оставить как есть.
+  if (!budgetAvailable(cfg.dailyRequestLimit)) {
+    handOff();
+    await aiStore.writeLog({
+      ...base,
+      answer: null,
+      source: 'budget',
+      verdict: 'normal',
+      billed: false,
+      sent: false,
     });
     return;
   }
@@ -569,17 +622,19 @@ async function answer(client, channel, userState, message, cfg, settings) {
       scope: channel,
       graceMs: HEALTH_GRACE_MS,
     });
-    // The viewer still gets an answer, just the scripted one - the same line they would have got
-    // with the feature switched off.
-    const fallback = settings.responses.busy.random();
-    const sent = send(fallback);
+    // Зритель всё равно получает ответ - тот самый, который получил бы с выключенной фичей.
+    // Раньше здесь слалась отговорка напрямую, мимо «да/нет» на вопрос и мимо обоих выключателей
+    // с кулдаунами; хвост цепочки знает про них все, поэтому зовём его, а не повторяем половину.
+    // В журнал уходит answer: null - сказанное хвостом не является ответом ИИ и не должно
+    // попадать в колонку, по которой судят о качестве ответов модели.
+    handOff();
     await aiStore.writeLog({
       ...base,
-      answer: fallback,
+      answer: null,
       source: 'error',
       verdict: 'normal',
       billed: false,
-      sent,
+      sent: false,
       error: describeError(err),
     });
     return;
