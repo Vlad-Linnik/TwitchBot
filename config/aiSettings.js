@@ -4,7 +4,8 @@
 // on the site reaches the running bot within seconds and without a restart.
 //
 // The per-channel half of this feature (enabled / tone / cheatsheet) is NOT here - it rides along
-// in ChannelConfig and is read through channelSettings.getSettings(channel).ai.
+// in ChannelConfig and is read through channelSettings.getSettings(channel).ai, and the channel
+// memory the bot writes for itself is rows in AiChannelMemory rather than a setting at all.
 const { connect } = require('../db/db.js');
 
 // Hand-kept in sync with TwitchBot-Web/db/aiConfigRepo.js's DEFAULT_AI_CONFIG. These values are
@@ -20,6 +21,8 @@ const DEFAULT_AI_CONFIG = {
   requestTimeoutMs: 8000,
   memoryPairs: 5,
   memoryTtlDays: 30,
+  channelMemoryEnabled: true,
+  channelMemoryMax: 25,
   persona: '',
 };
 
