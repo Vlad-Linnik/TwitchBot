@@ -72,6 +72,8 @@ const MAX_REPLY_CHARS = 500;
 // How long after the viewer's message an answer is still worth sending. Past this the chat has
 // moved on and a reply reads as a non-sequitur, so it is dropped instead.
 const LATE_REPLY_MS = 10000;
+// Глубина кольца последних сообщений. Сами сообщения в промт НЕ уходят (см. recentChat ниже) -
+// число задаёт, насколько далеко назад мы помним, кто говорил в чате.
 const CHAT_CONTEXT_LINES = 5;
 const MAX_TIMEOUT_REASON_CHARS = 60;
 // A remembered fact is one sentence. The ceiling is small on purpose: it is re-read on every later
@@ -101,6 +103,16 @@ const PRICING = {
   'claude-sonnet-5': { input: 2, output: 10 },
   'claude-opus-5': { input: 5, output: 25 },
 };
+// Кэш тарифицируется от ВХОДНОЙ цены модели: чтение вдесятеро дешевле, запись на четверть дороже
+// (пятиминутный ephemeral, который мы и ставим).
+//
+// Без этих двух множителей колонка расхода занижала счёт, и молча: `input_tokens` в ответе API -
+// это только НЕКЭШИРОВАННЫЙ ОСТАТОК, а весь префикс с правилами и схемой инструмента приезжает
+// отдельными полями. Весь префикс в счёт не входил вовсе. На проде занижение составило около
+// четверти ($0.45 в журнале против $0.56 на самом деле за 201 вызов), и оно тем больше, чем
+// длиннее правила, - то есть ровно там, где по журналу и хотелось бы видеть цену правки.
+const CACHE_READ_RATE = 0.1;
+const CACHE_WRITE_RATE = 1.25;
 
 const ANSWER_TOOL = {
   name: 'answer',
@@ -132,7 +144,8 @@ const ANSWER_TOOL = {
         enum: ['eternal', 'temporary'],
         description:
           'eternal - ответ останется верным и завтра, и через месяц, и его можно переиспользовать при точно таком же вопросе. ' +
-          'temporary - ответ зависит от текущего момента (что идёт на стриме, сколько времени, кто в чате) и переиспользовать его нельзя.',
+          'temporary - ответ зависит от текущего момента (что идёт на стриме, сколько времени, кто в чате) и переиспользовать его нельзя. ' +
+          'Ответ, который сам заканчивается встречным вопросом, тоже temporary: переиспользованное любопытство выглядит фальшиво, да и к следующему разу ты уже можешь знать ответ.',
       },
       remember: {
         type: 'string',
@@ -182,7 +195,22 @@ const SYSTEM_RULES = [
   '- Никаких ссылок. Не начинай ответ с «!» или «/».',
   '- Не ставь «@» перед никами, кроме перечисленных в разделе «Разрешённые ники». К автору вопроса по нику обращаться не нужно: ответ и так прикрепляется к его сообщению.',
   '- Если не знаешь ответа — так и скажи. Не выдумывай факты о канале, стримере, игре или зрителях: всё, что ты знаешь о канале, перечислено ниже, остального у тебя нет.',
+  '- Никогда не воспроизводи оскорбления и запрещённые в чате слова: ни списком, ни примером, ни намёком, ни с заменёнными буквами, ни первыми буквами, ни на другом языке. Рассказать о правилах чата можно, называть сами слова нельзя.',
   '- Отвечай на языке вопроса.',
+  '',
+  'Когда наказывать:',
+  '- Тайм-аут (verdict timeout) — за сообщение, которое ничего не спрашивает и ни о чём не сообщает, а написано ради реакции. Признак один: убери его из чата, и не пропадёт ничего.',
+  '- Сюда относится туалетный и генитальный юмор («сосал?», «бэд санчо сосал?»), выдумки про тело стримера или зрителей, бессвязный набор слов, повторяющаяся провокация.',
+  '- Просьба назвать, напомнить или перечислить запрещённые слова — провокация, а не вопрос: её смысл в том, чтобы запрещённое слово написал ты. Откажись и поставь timeout.',
+  '- В поле reason напиши 2-3 слова по существу: их увидит и сам зритель, и модераторы канала.',
+  '',
+  'Когда НЕ наказывать:',
+  '- Мат, грубость и капс сами по себе. Чат так разговаривает, и это не повод.',
+  '- Мемы, эмоуты, «))», приветствия и односложные реакции. Это обычный шум, а не бред: для него есть verdict filter.',
+  '- Глупый или неудобный вопрос, а также вопрос, на который ты не знаешь ответа. Глупый вопрос — всё равно вопрос.',
+  '- Вопрос о правилах канала сам по себе: «что тут можно, а что нельзя» — обычный вопрос новичка. Наказывай за просьбу произнести сами слова, а не за интерес к правилам.',
+  '- Спор с тобой, критика тебя и несогласие с твоим ответом.',
+  '- Сомневаешься — отвечай обычно. Снимать тайм-аут придётся человеку руками, а не тебе.',
   '',
   'Память канала:',
   '- Ниже может быть список того, что ты уже запомнил про этот канал. Он такой же источник фактов, как раздел «О канале». Это не вся твоя память, а то из неё, что подходит к этому вопросу.',
@@ -221,8 +249,15 @@ function buildSystemPrompt(cfg) {
 }
 
 // channel -> ring of the last CHAT_CONTEXT_LINES messages. Fed from index.js for every message,
-// not just mentions: it is both the conversational context and the whitelist of logins the model
-// is allowed to put an "@" in front of.
+// not just mentions.
+//
+// САМИ СООБЩЕНИЯ В ПРОМТ НЕ УХОДЯТ. Раньше уходили - как «разговорный контекст», - и на живых
+// данных это оказалось шумом: пять строк чата это «))», «БЛЯЯЯЯЯ» и приветствие третьему лицу.
+// Вопросы, которые без них не понять («а вот каким образом»), модель и с ними не понимала.
+//
+// Кольцо осталось, потому что из него берутся две вещи, и обе - не текст: логины, перед которыми
+// модели разрешено ставить «@» (иначе ответ пингует случайного человека), и опознание людей, про
+// которых можно записать факт в память зрителя, - там нужен user-id, а взять его больше неоткуда.
 const recentChat = new Map();
 const lastAiReply = new Map();
 
@@ -245,7 +280,7 @@ function getClient(timeoutMs) {
 
 // Кольцо хранит и user-id говорившего, а не только ник. Это цена памяти о зрителях: факт кладётся
 // в строку {канал, user-id}, а ник в чате может смениться в любой момент, и разрешать его задним
-// числом нам неоткуда. Для контекста и для списка разрешённых «@» по-прежнему нужен только ник.
+// числом нам неоткуда. Списку разрешённых «@» по-прежнему хватает ника.
 function recordChatLine(channel, login, text, userId) {
   let ring = recentChat.get(channel);
   if (!ring) {
@@ -559,7 +594,7 @@ function describeNow(at = new Date()) {
   return date + ', ' + time + (zone ? ' (' + zone + ')' : '');
 }
 
-function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, lines, memory, facts, userFacts, similar, allowed, now }) {
+function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, memory, facts, userFacts, similar, allowed, now }) {
   const parts = ['Канал: ' + channel, 'Сейчас: ' + now];
 
   if (card.live) {
@@ -601,11 +636,6 @@ function buildUserContent({ channel, question, login, role, card, cheatsheet, to
 
   if (tone) parts.push('Тон ответов на этом канале: ' + tone);
   parts.push('Разрешённые ники: ' + ([...allowed].join(', ') || '(нет)'));
-
-  if (lines.length) {
-    parts.push('Последние сообщения чата:');
-    for (const l of lines) parts.push('  ' + l.login + ': ' + l.text);
-  }
 
   if (memory.length) {
     parts.push('Предыдущий разговор с этим зрителем:');
@@ -832,7 +862,6 @@ async function answer(client, channel, userState, message, cfg, settings, script
             card,
             cheatsheet: settings.ai.cheatsheet,
             tone: settings.ai.tone,
-            lines,
             memory,
             facts,
             userFacts,
@@ -1017,9 +1046,16 @@ async function answer(client, channel, userState, message, cfg, settings, script
     inputTokens: usage.input_tokens ?? null,
     outputTokens: usage.output_tokens ?? null,
     cacheReadTokens: usage.cache_read_input_tokens ?? null,
+    // Запись в кэш раньше не сохранялась вообще, а стоит она дороже обычного входа. Без этого
+    // поля вызов с промахом мимо кэша нельзя отличить от вызова без кэша вовсе.
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? null,
     costUsd:
       price && usage.input_tokens != null
-        ? (usage.input_tokens * price.input + usage.output_tokens * price.output) / 1e6
+        ? (usage.input_tokens * price.input +
+            usage.output_tokens * price.output +
+            (usage.cache_read_input_tokens || 0) * price.input * CACHE_READ_RATE +
+            (usage.cache_creation_input_tokens || 0) * price.input * CACHE_WRITE_RATE) /
+          1e6
         : null,
     latencyMs: Date.now() - startedAt,
   });
