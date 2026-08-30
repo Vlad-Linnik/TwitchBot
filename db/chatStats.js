@@ -102,6 +102,11 @@ class ChatStats {
     // word cloud on whiteListCache alone let `jokerge`, `arolf` and `wideNessie` - emotes, with
     // tens of thousands of uses each - straight into its word cloud as if they were words.
     this.emoteExclusionCache = new Map();
+    // Третий взгляд на тот же набор: строчное написание -> написание, которым смайлик
+    // нарисуется. Нужен ровно одному потребителю - правке ответа модели (shared/emoteFix.js),
+    // которая должна не спросить «смайлик ли это», а получить ПРАВИЛЬНОЕ написание для «kekw».
+    // Всегда пересобирается вместе с whiteListCache, потому что отвечает про тот же набор.
+    this.emoteSpellingCache = new Map();
   }
 
   async initialize() {
@@ -218,6 +223,8 @@ class ChatStats {
         if (!this.whiteListCache.has(item.channel)) this.whiteListCache.set(item.channel, new Set());
         this.whiteListCache.get(item.channel).add(item.word);
       }
+      this.emoteSpellingCache = new Map();
+      for (const channel of this.whiteListCache.keys()) this.reindexEmoteSpellings(channel);
 
       // Word-cloud exclusion set: every emote this channel tracks now (whiteList), ever tracked
       // (WordLifetimeStats), or had pruned away (EmoteExclusions tombstones). Lowercased, because
@@ -811,6 +818,33 @@ class ChatStats {
     return this.whiteListCache.get(channel)?.has(word) ?? false;
   }
 
+  // Строчное написание -> написание из набора канала. Пересобирается целиком, а не правится по
+  // одному слову: набор одного канала - несколько сотен строк, а два места, где он меняется
+  // (загрузка и синхронизация), обязаны давать одинаковый индекс.
+  //
+  // Столкновение регистров реально: в глобальном наборе Twitch лежат и «:p», и «:P», и все
+  // четыре написания «o.O». Побеждает первое встреченное, и это безопасно ровно потому, что
+  // столкнуться могут только НАСТОЯЩИЕ смайлики - любое из них нарисуется.
+  reindexEmoteSpellings(channel) {
+    const spellings = new Map();
+    for (const word of this.whiteListCache.get(channel) || []) {
+      const key = String(word).toLowerCase();
+      if (!spellings.has(key)) spellings.set(key, word);
+    }
+    this.emoteSpellingCache.set(channel, spellings);
+  }
+
+  // Как этот смайлик пишется на самом деле, или null, если такого смайлика у канала нет.
+  //
+  // Точное написание проверяется первым: канал, у которого есть и «SVIN», и «svin», должен
+  // получить обратно ровно то, что ему написали, а не то, что первым попало в индекс.
+  canonicalEmote(channel, word) {
+    const token = String(word ?? '');
+    if (!token) return null;
+    if (this.isInWhiteList(channel, token)) return token;
+    return this.emoteSpellingCache.get(channel)?.get(token.toLowerCase()) ?? null;
+  }
+
   // Makes `channel`'s whitelist entries FOR ONE SOURCE exactly match `words`: upserts the current
   // ones, drops the ones that source no longer lists, and leaves every other source alone.
   //
@@ -855,6 +889,7 @@ class ChatStats {
     staleWords.forEach(word => cacheSet.delete(word));
     wordSet.forEach(word => cacheSet.add(word));
     this.whiteListCache.set(channel, cacheSet);
+    this.reindexEmoteSpellings(channel);
     // staleWords are intentionally NOT un-excluded from the word cloud - see rememberEmote().
     // Words that are NEW to the exclusion set were, until now, being counted into ChatWordStats
     // as ordinary words - purge those rows so the new emote also disappears from the word cloud

@@ -62,6 +62,7 @@ const { isKnownBot, KNOWN_BOT_LOGINS } = require('../config/knownBots.js');
 const { replyIfBotLacksMod } = require('../shared/botPermission.js');
 const { isTimerReady } = require('../shared/timer.js');
 const memoryRecall = require('../shared/memoryRecall.js');
+const emoteFix = require('../shared/emoteFix.js');
 const aiProvider = require('./aiProvider.js');
 const { clean } = require('../shared/textStats.js');
 const healthTracker = require('../shared/healthTracker.js');
@@ -518,7 +519,7 @@ function stripToolMarkup(text) {
   return at === -1 ? String(text || '') : String(text).slice(0, at);
 }
 
-function sanitizeReply(text, allowedLogins) {
+function sanitizeReply(text, allowedLogins, channel) {
   let out = stripToolMarkup(text).replace(/\s+/g, ' ').trim();
   out = out.replace(/https?:\/\/\S+/gi, ' ');
   out = out.replace(/\b[\w-]+\.(?:com|net|org|ru|ua|tv|io|me|gg|xyz|dev|app)\b\S*/gi, ' ');
@@ -529,6 +530,10 @@ function sanitizeReply(text, allowedLogins) {
   );
   // A leading "!" or "/" would fire a command - ours, another bot's, or Twitch's own.
   out = out.replace(/^[!/.]+\s*/, '');
+  // Смайлики - последними, потому что правка ставит пробелы, а всё выше их схлопывает и режет
+  // куски строки. Написанное моделью «kekw,» станет картинкой только если оно написано регистром
+  // из набора канала и стоит отдельным токеном - см. shared/emoteFix.js.
+  out = emoteFix.fixEmotes(out, (word) => chatStats.canonicalEmote(channel, word));
   return out.replace(/\s+/g, ' ').trim().slice(0, MAX_REPLY_CHARS);
 }
 
@@ -966,7 +971,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
   const out = res.fields;
   const rawReply = out ? out.reply : res.text;
 
-  const reply = sanitizeReply(rawReply, allowed);
+  const reply = sanitizeReply(rawReply, allowed, channel);
   const verdict = out && out.verdict ? out.verdict : 'normal';
   const reason = sanitizeReason(out ? out.reason : '');
   const usage = res.usage;
