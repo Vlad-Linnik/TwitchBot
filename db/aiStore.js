@@ -41,7 +41,6 @@ async function ensureInitialized() {
     cols.cache.createIndex({ channel: 1, lastHitAt: -1, createdAt: -1 }),
     cols.log.createIndex({ channel: 1, userId: 1, createdAt: -1 }),
     cols.log.createIndex({ createdAt: -1 }),
-    cols.log.createIndex({ channel: 1, questionKey: 1 }),
     cols.ignored.createIndex({ channel: 1, userId: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, key: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
@@ -95,11 +94,24 @@ async function findCachedAnswer(channel, text) {
   return found ? found.answer : null;
 }
 
-async function cacheAnswer(channel, text, answer) {
+// Возвращает true, если ответ теперь лежит в кэше - новой строкой или поверх прежней. Это то, что
+// показывает журнал в панели: вопрос не «завели ли строку», а «будет ли следующий такой вопрос
+// бесплатным». Ротацию при этом взводит только вставка: перезапись ничего не добавила.
+//
+// РОТАЦИЯ ПОЯВИЛАСЬ ВМЕСТЕ С ЗАПИСЬЮ С ПЕРВОГО ОБРАЩЕНИЯ. Пока кэш пополнялся только со второго,
+// он рос медленно и потолок был не нужен; теперь сюда попадает всё, что модель назвала вечным, и
+// без потолка страница кэша в панели превратилась бы в свалку - именно то возражение, ради
+// которого когда-то и появилось условие «со второго раза» (см. games/aiReply.js).
+//
+// Вылетает не самый старый, а тот, к которому дольше всего не обращались: строка, которую
+// спрашивают раз в месяц, полезнее записанной вчера и ни разу не пригодившейся. У только что
+// вставленной строки обращений ещё нет, поэтому в сравнении участвует createdAt - иначе она
+// вылетала бы первой же ротацией, не дожив до своего первого попадания.
+async function cacheAnswer(channel, text, answer, max) {
   const c = await ensureInitialized();
   const key = aiTextKey(text);
-  if (!key) return;
-  await c.cache.updateOne(
+  if (!key) return false;
+  const res = await c.cache.updateOne(
     { channel, text: key },
     {
       $set: { answer: String(answer || '') },
@@ -107,15 +119,32 @@ async function cacheAnswer(channel, text, answer) {
     },
     { upsert: true }
   );
+  const added = Boolean(res.upsertedCount);
+
+  if (added && max > 0) {
+    const total = await c.cache.countDocuments({ channel });
+    if (total > max) {
+      const rows = await c.cache
+        .find({ channel }, { projection: { _id: 1, lastHitAt: 1, createdAt: 1 } })
+        .toArray();
+      rows.sort(
+        (a, b) =>
+          (a.lastHitAt || a.createdAt || 0).valueOf() - (b.lastHitAt || b.createdAt || 0).valueOf()
+      );
+      const stale = rows.slice(0, total - max);
+      if (stale.length) await c.cache.deleteMany({ _id: { $in: stale.map((d) => d._id) } });
+    }
+  }
+  return added || Boolean(res.matchedCount);
 }
 
 // Вопросы этого канала, на которые ответ уже был, - для поиска похожего в
 // shared/memoryRecall.js. Не замена findCachedAnswer: тот отдаёт ответ при точном совпадении и
 // без обращения к модели, а это выборка кандидатов для подсказки в промт.
 //
-// Выборка ограничена и упорядочена по последнему обращению, а не по дате создания: кэш растёт
-// без ротации, и при канале с длинной историей читать его целиком на горячем пути нельзя. Строка,
-// к которой обращались недавно, - и есть та, о которой спросят снова.
+// Выборка ограничена и упорядочена по последнему обращению, а не по дате создания: потолок кэша
+// выше того, что имеет смысл читать на горячем пути, и строка, к которой обращались недавно, - и
+// есть та, о которой спросят снова. Тот же порядок, по которому ротация выбирает, что вытеснить.
 async function recentAnswers(channel, limit) {
   const c = await ensureInitialized();
   if (!limit) return [];
@@ -414,18 +443,7 @@ async function publishBuiltinPrompt(text) {
 
 async function writeLog(row) {
   const c = await ensureInitialized();
-  // questionKey кладётся рядом с текстом вопроса, чтобы «спрашивали ли это раньше» было одним
-  // индексным запросом, а не перебором журнала. Ключ тот же, по которому ищет кэш.
-  await c.log.insertOne({ ...row, questionKey: aiTextKey(row.question), createdAt: new Date() });
-}
-
-// Сколько раз этот вопрос уже задавали в этом канале. Нужен, чтобы кэшировать ответ со второго
-// обращения, а не с первого: см. games/aiReply.js.
-async function timesAsked(channel, question) {
-  const c = await ensureInitialized();
-  const key = aiTextKey(question);
-  if (!key) return 0;
-  return c.log.countDocuments({ channel, questionKey: key });
+  await c.log.insertOne({ ...row, createdAt: new Date() });
 }
 
 // The last N exchanges this viewer had with the bot in this channel, oldest first so the model
@@ -494,7 +512,6 @@ module.exports = {
   touchUserFacts,
   forgetUserFact,
   writeLog,
-  timesAsked,
   recentExchanges,
   countBilledSince,
   streamCard,
