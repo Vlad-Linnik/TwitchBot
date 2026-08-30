@@ -14,7 +14,7 @@
 // other chat-stat collection in this database.
 const { connect } = require('./db.js');
 const { aiTextKey } = require('../shared/aiTextKey.js');
-const { factPriority } = require('../shared/memoryRecall.js');
+const { factPriority, rankFacts } = require('../shared/memoryRecall.js');
 
 let cols = null;
 
@@ -224,6 +224,12 @@ async function rememberFact(channel, fact, meta, max) {
         // случайного зрителя - см. factPriority в shared/memoryRecall.js.
         authorRole: meta.authorRole || 'viewer',
         sourceMessage: meta.sourceMessage || null,
+        // Слова, по которым этот факт надо находить, помимо его собственных - их придумывает та же
+        // модель в том же вызове (shared/memoryRecall.js:factStems). Пишутся только при вставке,
+        // как и сам текст: повтор того же факта - это тот же факт, а не повод переписать его
+        // поисковые слова. Строки, записанные до появления поля, приезжают без него, и отбор
+        // работает по одному тексту, как работал раньше.
+        keywords: Array.isArray(meta.keywords) ? meta.keywords : [],
         createdAt: new Date(),
         // Заводится сразу, чтобы поле было у каждой строки: ротация сортирует по нему, и
         // отсутствующее значение отправило бы только что записанный факт первым на вылет.
@@ -300,6 +306,12 @@ async function forgetFact(channel, key) {
 // Логин лежит рядом и переписывается при каждой записи - в промте и в админке человек узнаётся по
 // нику, и показать устаревший хуже, чем не показать никакого.
 //
+// ПИШЕТСЯ ВСЕГДА В СВОЙ КАНАЛ, ЧИТАТЬСЯ МОЖЕТ ПО НЕСКОЛЬКИМ. Канал в ключе остаётся, даже когда
+// каналы делят память (см. listUserMemory): автор, роль и исходное сообщение - свидетельство
+// местное, страница курирования в панели тоже на канал, а один и тот же факт, сказанный в двух
+// чатах, - это два независимых свидетельства, а не одно. Дубль строки дешевле склейки, у которой
+// не было бы ни одного автора.
+//
 // ПРО КОГО МОЖНО ЗАПИСАТЬ. Про любого, кто есть в текущем разговоре, а не только про самого
 // говорящего: рассказывают в чате чаще про соседа, чем про себя. Плата за это - подставные факты,
 // и именно поэтому у строки всегда сохранены автор (authorLogin/authorUserId/authorRole) и само
@@ -310,18 +322,32 @@ async function forgetFact(channel, key) {
 
 // Факты про перечисленных людей, старые сначала - тем же порядком они нумеруются в промте.
 //
-// Потолок применяется НА ЧЕЛОВЕКА и считается по строкам бота: написанные админом уходят в запрос
-// всегда и не вытесняются - то же правило, что и в памяти канала, и по той же причине (ceiling,
-// который не вытесняет, но считает, молча удаляет чужие строки в момент записи).
-async function listUserMemory(channel, userIds, perUser) {
+// ЧИТАЕТСЯ НЕ ОДИН КАНАЛ, А ПУЛ. `channels` - это либо строка, либо список каналов, чья память о
+// зрителях объединена (games/aiReply.js:memoryPool). Факт про человека - утверждение про человека,
+// а не про канал, и «играет на гитаре» одинаково верно везде; факт про канал так не переносится,
+// поэтому пул есть только здесь, а listMemory по-прежнему знает один канал.
+//
+// Потолок применяется НА ЧЕЛОВЕКА И НА ВЕСЬ ПУЛ СРАЗУ, а не на человека в каждом канале. Иначе он
+// перестал бы означать то, ради чего заведён: userMemoryMax - это то, сколько строк про человека
+// уходит в оплачиваемый запрос, и при чтении по N каналам их уехало бы до N×max. Настройка здесь
+// одна именно потому, что читаются строки одного-двух названных людей; связь «потолок хранилища =
+// потолок расхода» держится только пока обрезка сквозная.
+//
+// Отбор внутри потолка - по словам вопроса (тот же rankFacts, что и у памяти канала), и он нужен
+// ровно с появлением пула: пока канал был один, строк про человека было заведомо меньше потолка и
+// выбирать было не из чего. Без вопроса (или когда строк и так меньше потолка) порядок остаётся
+// прежним - по последнему обращению.
+async function listUserMemory(channels, userIds, perUser, question) {
   const c = await ensureInitialized();
   const ids = (userIds || []).map(String).filter(Boolean);
-  if (!ids.length) return [];
-  const rows = await c.userMemory.find({ channel, userId: { $in: ids } }).toArray();
+  const pool = (Array.isArray(channels) ? channels : [channels]).filter(Boolean);
+  if (!ids.length || !pool.length) return [];
+  const rows = await c.userMemory.find({ channel: { $in: pool }, userId: { $in: ids } }).toArray();
 
-  // Обрезка на чтении - страховка на случай, когда потолок в настройках только что понизили:
-  // ротация на записи об этом ещё не знает. Лишними считаются те строки бота, к которым дольше
-  // всего не обращались, - тот же порядок, по которому их вытесняет ротация ниже.
+  // Обрезка на чтении - страховка и на случай, когда потолок в настройках только что понизили:
+  // ротация на записи об этом ещё не знает. Строки, написанные админом, уходят в запрос всегда и
+  // не вытесняются - то же правило, что и в памяти канала, и по той же причине (потолок, который
+  // считает, но не вытесняет, молча удаляет чужие строки в момент записи).
   const kept = [];
   const byUser = new Map();
   for (const row of rows) {
@@ -333,8 +359,10 @@ async function listUserMemory(channel, userIds, perUser) {
     byUser.get(row.userId).push(row);
   }
   for (const list of byUser.values()) {
-    list.sort((a, b) => (b.lastUsedAt || b.createdAt || 0).valueOf() - (a.lastUsedAt || a.createdAt || 0).valueOf());
-    for (const row of list.slice(0, Math.max(perUser || 0, 0))) kept.push(row);
+    // По возрастанию последнего обращения: rankFacts при равном совпадении предпочитает то, что
+    // стоит в списке позже, а «позже» тут должно означать «нужнее».
+    list.sort((a, b) => (a.lastUsedAt || a.createdAt || 0).valueOf() - (b.lastUsedAt || b.createdAt || 0).valueOf());
+    for (const row of rankFacts(question, list, Math.max(perUser || 0, 0))) kept.push(row);
   }
   return kept.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 }
@@ -368,6 +396,8 @@ async function rememberUserFact(channel, subject, fact, meta, max) {
         authorUserId: meta.authorUserId || null,
         authorRole: meta.authorRole || 'viewer',
         sourceMessage: meta.sourceMessage || null,
+        // То же, что и у памяти канала: поисковые слова к факту, см. rememberFact выше.
+        keywords: Array.isArray(meta.keywords) ? meta.keywords : [],
         createdAt: new Date(),
         lastUsedAt: new Date(),
       },

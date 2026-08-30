@@ -42,6 +42,11 @@ const PREFIX_MATCH_MIN = 3;
 const PREFIX_MATCH_MAX_EXTRA = 1;
 const PREFIX_MATCH_WEIGHT = 0.6;
 
+// Сколько слов для поиска модель может привесить к факту сверх его собственного текста. Это
+// потолок, а не настройка: им и ограничена та широта, которую делитель в rankFacts намеренно не
+// считает, - см. factStems.
+const MAX_FACT_KEYWORDS = 5;
+
 // Стоп-слова сравниваются по стему, а не по написанию: список в textStats.js перечисляет
 // «какой», а в чате встретится «какие» - один стем, одно решение.
 const STOPWORD_STEMS = new Set();
@@ -105,6 +110,35 @@ function stemsOf(text) {
   return out;
 }
 
+// Слова, по которым факт вообще может найтись: его собственные плюс те, что модель привесила к
+// нему при записи (поле keywords).
+//
+// ЗАЧЕМ ОНИ. Факт записывается одной формулировкой, а спрашивают его другой. «Стрим начинается в
+// 19:00» и «во сколько ты сегодня начнёшь» не пересекаются ни одним словом, и стеммер тут не
+// помогает: это синонимы, а не словоформы, и подтянуть их неоткуда - словаря синонимов у нас нет.
+// Придумать их может тот, кто факт записывал, поэтому список приходит из той же модели и в том же
+// вызове, что и сам факт: отдельный вызов ради пяти слов стоил бы дороже, чем весь отбор экономит.
+//
+// ДЕЛИТЕЛЬ В rankFacts ИХ НЕ СЧИТАЕТ, и это не забывчивость. Делитель наказывает СЛУЧАЙНУЮ широту:
+// длинный факт задевает много слов просто потому, что он длинный. Ключевые слова - широта
+// намеренная, и ограничивает её потолок MAX_FACT_KEYWORDS, а не делитель. Считай мы их в делителе,
+// факт с ключевыми словами проигрывал бы по своему же прямому попаданию - то есть правка иногда
+// ухудшала бы поиск, а это худший из двух перекосов: незаметный.
+function factStems(row) {
+  const own = stemsOf(row && row.fact);
+  const seen = new Set(own);
+  const extra = [];
+  const keywords = row && Array.isArray(row.keywords) ? row.keywords : [];
+  for (const word of keywords.slice(0, MAX_FACT_KEYWORDS)) {
+    for (const s of stemsOf(word)) {
+      if (seen.has(s)) continue;
+      seen.add(s);
+      extra.push(s);
+    }
+  }
+  return { own, all: own.concat(extra) };
+}
+
 // Два стема - формы одного слова. Единственное место, где это решается: и подсчёт совпадений
 // ниже, и проверка «тот же самый вопрос» обязаны понимать одинаково, иначе вопрос мог бы
 // считаться тем же самым по одному правилу и не тем же по другому.
@@ -157,14 +191,16 @@ function rankFacts(question, rows, limit) {
 
   const queryStems = stemsOf(question).slice(0, MAX_QUERY_STEMS);
   const scored = list.map((row, index) => {
-    const docStems = stemsOf(row.fact);
-    const { score, matched } = queryStems.length ? overlap(queryStems, docStems) : { score: 0, matched: 0 };
+    // Ищем по словам факта И по привешенным к нему ключевым, делим только на длину самого факта -
+    // почему именно так, написано у factStems.
+    const { own, all } = factStems(row);
+    const { score, matched } = queryStems.length ? overlap(queryStems, all) : { score: 0, matched: 0 };
     return {
       row,
       index,
       matched,
       priority: factPriority(row),
-      weight: score / Math.sqrt(Math.max(docStems.length, 1)),
+      weight: score / Math.sqrt(Math.max(own.length, 1)),
     };
   });
 
@@ -267,11 +303,13 @@ function findSimilarAnswer(question, rows) {
 
 module.exports = {
   stemsOf,
+  factStems,
   overlap,
   isSameQuestion,
   factPriority,
   factRoleLabel,
   FACT_PRIORITY,
+  MAX_FACT_KEYWORDS,
   rankFacts,
   findSimilarAnswer,
   MIN_STEM_LENGTH,

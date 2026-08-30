@@ -991,8 +991,12 @@ class ChatStats {
       (await this.userIdentities.findOne({ 'nicknames.name': name }));
     if (!identity) return null;
 
+    // Канал может быть и списком: память о зрителях читается по пулу каналов, делящих её между
+    // собой (games/aiReply.js:memoryPool). UserIdentities глобальна, и без этой проверки «есть ли
+    // такой человек» отвечало бы «да» про любого, кто когда-либо писал в любом чате.
+    const channels = Array.isArray(channel) ? channel : [channel];
     const seenHere = await this.userLifetimeStats.findOne(
-      { channel, userId: identity.userId },
+      { channel: { $in: channels }, userId: identity.userId },
       { projection: { _id: 1 } }
     );
     if (!seenHere) return null;

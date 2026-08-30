@@ -85,6 +85,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
     enabled: false,
     tone: "",
     cheatsheet: "",
+    // Делит ли канал память о зрителях с другими такими же каналами (games/aiReply.js:memoryPool).
+    // Выключено по умолчанию: подключённый завтра канал не должен ни наследовать чужую память, ни
+    // отдавать свою. Память КАНАЛА этим не делится никогда - она про канал, а не про людей.
+    memoryShare: false,
   },
   responses: {
     busy: ["I am busy"],
