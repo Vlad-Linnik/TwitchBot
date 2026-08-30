@@ -435,7 +435,10 @@ async function timesAsked(channel, question) {
 async function recentExchanges(channel, userId, limit) {
   const c = await ensureInitialized();
   const rows = await c.log
-    .find({ channel, userId: String(userId), answer: { $nin: [null, ''] } })
+    // Отзыв смайликом сюда не попадает. Это не реплика в разговоре, а зеркало: пять таких строк
+    // вытеснили бы из промта настоящие вопросы этого зрителя и заняли бы место во входных
+    // токенах - то есть путь, заведённый ради экономии, начал бы её же и проедать.
+    .find({ channel, userId: String(userId), source: { $ne: 'emote' }, answer: { $nin: [null, ''] } })
     .sort({ createdAt: -1 })
     .limit(limit)
     .toArray();

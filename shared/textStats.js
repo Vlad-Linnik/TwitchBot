@@ -191,6 +191,7 @@ function dayBucket(date = new Date()) {
 const LIFETIME_BUCKET = new Date(0);
 
 module.exports = {
+  clean,
   extractWords,
   extractMentions,
   isCommandMessage,
