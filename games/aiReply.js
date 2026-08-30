@@ -62,6 +62,7 @@ const { isKnownBot, KNOWN_BOT_LOGINS } = require('../config/knownBots.js');
 const { replyIfBotLacksMod } = require('../shared/botPermission.js');
 const { isTimerReady } = require('../shared/timer.js');
 const memoryRecall = require('../shared/memoryRecall.js');
+const aiProvider = require('./aiProvider.js');
 const { clean } = require('../shared/textStats.js');
 const healthTracker = require('../shared/healthTracker.js');
 const describeError = require('../shared/describeError.js');
@@ -71,7 +72,9 @@ const describeError = require('../shared/describeError.js');
 //
 // A reply is capped at 500 characters by Twitch itself, and 400 output tokens is far more than
 // that needs; the ceiling exists because running out of output tokens is silent (the message comes
-// back with no usable content rather than an error).
+// back with no usable content rather than an error). Это бюджет самого ответа: поставщику, у
+// которого размышление не выключается, games/aiProvider.js добавляет к нему свой запас, иначе
+// размышление съедает потолок и вызов возвращается пустым - тем же молчаливым способом.
 const MAX_TOKENS = 400;
 const MAX_REPLY_CHARS = 500;
 // How long after the viewer's message an answer is still worth sending. Past this the chat has
@@ -107,25 +110,9 @@ const IGNORE_REFRESH_MS = 60000;
 // that would retry, per shared/healthTracker.js's convention.
 const HEALTH_GRACE_MS = 120000;
 
-// Anthropic list prices in USD per million tokens, checked 2026-08-29. Only fills the journal's
-// cost column: a stale number here misreports spend, it never changes behaviour. A model missing
-// from this table logs a null cost rather than a wrong one.
-const PRICING = {
-  'claude-haiku-4-5': { input: 1, output: 5 },
-  'claude-sonnet-5': { input: 2, output: 10 },
-  'claude-opus-5': { input: 5, output: 25 },
-};
-// Кэш тарифицируется от ВХОДНОЙ цены модели: чтение вдесятеро дешевле, запись на четверть дороже
-// (пятиминутный ephemeral, который мы и ставим).
-//
-// Без этих двух множителей колонка расхода занижала счёт, и молча: `input_tokens` в ответе API -
-// это только НЕКЭШИРОВАННЫЙ ОСТАТОК, а весь префикс с правилами и схемой инструмента приезжает
-// отдельными полями. Весь префикс в счёт не входил вовсе. На проде занижение составило около
-// четверти ($0.45 в журнале против $0.56 на самом деле за 201 вызов), и оно тем больше, чем
-// длиннее правила, - то есть ровно там, где по журналу и хотелось бы видеть цену правки.
-const CACHE_READ_RATE = 0.1;
-const CACHE_WRITE_RATE = 1.25;
-
+// Схема ответа модели. Описана в форме Anthropic и на этой стороне одна: перевод её в форму
+// Google, выбор поставщика по имени модели, цены и приведение счёта к общему виду лежат в
+// games/aiProvider.js. Здесь - только то, что модель должна вернуть, и почему именно это.
 const ANSWER_TOOL = {
   name: 'answer',
   description: 'Ответить зрителю в чат и оценить его сообщение.',
@@ -273,23 +260,6 @@ function buildSystemPrompt(cfg) {
 // которых можно записать факт в память зрителя, - там нужен user-id, а взять его больше неоткуда.
 const recentChat = new Map();
 const lastAiReply = new Map();
-
-// Anthropic client, built on first use: the key is optional, and a deployment without one should
-// fall back to the scripted replies rather than fail to boot.
-let anthropic = null;
-function getClient(timeoutMs) {
-  if (!anthropic) {
-    const Anthropic = require('@anthropic-ai/sdk');
-    anthropic = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      // No SDK retries: the whole answer has a hard few-second budget, and a retry would spend it
-      // producing an answer that is already too late to send.
-      maxRetries: 0,
-      timeout: timeoutMs,
-    });
-  }
-  return anthropic;
-}
 
 // Кольцо хранит и user-id говорившего, а не только ник. Это цена памяти о зрителях: факт кладётся
 // в строку {канал, user-id}, а ник в чате может смениться в любой момент, и разрешать его задним
@@ -745,7 +715,9 @@ function quotesVolatile(text, values) {
 function tryAnswer(client, channel, userState, message, scripted) {
   const cfg = aiSettings.get();
   if (!cfg.enabled) return false;
-  if (!process.env.ANTHROPIC_API_KEY) return false;
+  // Ключ спрашивается у поставщика выбранной модели, а не у одного зашитого имени переменной:
+  // ключи у поставщиков свои, и выбранная в панели модель решает, какой из них нужен.
+  if (!aiProvider.hasKey(cfg.model)) return false;
 
   const settings = channelSettings.getSettings(channel);
   if (!settings.ai || !settings.ai.enabled) return false;
@@ -931,42 +903,27 @@ async function answer(client, channel, userState, message, cfg, settings, script
   let res;
   const startedAt = Date.now();
   try {
-    res = await getClient(cfg.requestTimeoutMs).messages.create({
+    res = await aiProvider.ask({
       model: cfg.model,
-      max_tokens: MAX_TOKENS,
-      // Rules and persona are the same for every channel and every message, so they are the stable
-      // cache prefix; everything that varies is in the user turn below it. Whether the prefix is
-      // long enough for the cache to engage is visible in the journal's cacheReadTokens column -
-      // a short prompt silently does not cache.
-      system: [
-        {
-          type: 'text',
-          text: buildSystemPrompt(cfg),
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      tools: [ANSWER_TOOL],
-      tool_choice: { type: 'tool', name: 'answer' },
-      messages: [
-        {
-          role: 'user',
-          content: buildUserContent({
-            channel,
-            question,
-            login,
-            now: nowText,
-            role: describeRole(userState),
-            card,
-            cheatsheet: settings.ai.cheatsheet,
-            tone: settings.ai.tone,
-            memory,
-            facts,
-            userFacts,
-            similar,
-            allowed,
-          }),
-        },
-      ],
+      maxTokens: MAX_TOKENS,
+      timeoutMs: cfg.requestTimeoutMs,
+      tool: ANSWER_TOOL,
+      system: buildSystemPrompt(cfg),
+      user: buildUserContent({
+        channel,
+        question,
+        login,
+        now: nowText,
+        role: describeRole(userState),
+        card,
+        cheatsheet: settings.ai.cheatsheet,
+        tone: settings.ai.tone,
+        memory,
+        facts,
+        userFacts,
+        similar,
+        allowed,
+      }),
     });
     healthTracker.reportSuccess('ai-reply', { label: 'AI-ответы на упоминания', scope: channel });
   } catch (err) {
@@ -998,20 +955,16 @@ async function answer(client, channel, userState, message, cfg, settings, script
 
   billedToday += 1;
 
-  const toolUse = (res.content || []).find((b) => b.type === 'tool_use');
-  // A forced tool_choice makes this the expected shape, but a refusal or a truncated response can
-  // still arrive as a normal 200 with nothing usable in it - checked rather than assumed, because
-  // the failure is silent otherwise.
-  const out = toolUse && toolUse.input ? toolUse.input : null;
-  const rawReply = out
-    ? out.reply
-    : (res.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ');
+  // Принудительный вызов инструмента делает поля ожидаемой формой ответа, но отказ и обрыв по
+  // потолку токенов приезжают обычным 200, в котором нет ничего пригодного, - проверяем, а не
+  // предполагаем, потому что иначе этот отказ молчаливый.
+  const out = res.fields;
+  const rawReply = out ? out.reply : res.text;
 
   const reply = sanitizeReply(rawReply, allowed);
   const verdict = out && out.verdict ? out.verdict : 'normal';
   const reason = sanitizeReason(out ? out.reason : '');
-  const usage = res.usage || {};
-  const price = PRICING[cfg.model];
+  const usage = res.usage;
 
   // ЗА ЧТО МОДЕЛЬ ХОЧЕТ НАКАЗАТЬ, НА ТО ОНА НЕ ОТВЕЧАЕТ. Признак таких сообщений сформулирован в
   // правилах так: убери его из чата, и не пропадёт ничего, - а раз отвечать не на что, то и любая
@@ -1150,20 +1103,14 @@ async function answer(client, channel, userState, message, cfg, settings, script
     similarTo: similar ? similar.text : null,
     protectedUser: isProtected(userState),
     model: cfg.model,
-    inputTokens: usage.input_tokens ?? null,
-    outputTokens: usage.output_tokens ?? null,
-    cacheReadTokens: usage.cache_read_input_tokens ?? null,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadTokens: usage.cacheReadTokens,
     // Запись в кэш раньше не сохранялась вообще, а стоит она дороже обычного входа. Без этого
-    // поля вызов с промахом мимо кэша нельзя отличить от вызова без кэша вовсе.
-    cacheWriteTokens: usage.cache_creation_input_tokens ?? null,
-    costUsd:
-      price && usage.input_tokens != null
-        ? (usage.input_tokens * price.input +
-            usage.output_tokens * price.output +
-            (usage.cache_read_input_tokens || 0) * price.input * CACHE_READ_RATE +
-            (usage.cache_creation_input_tokens || 0) * price.input * CACHE_WRITE_RATE) /
-          1e6
-        : null,
+    // поля вызов с промахом мимо кэша нельзя отличить от вызова без кэша вовсе. У поставщика с
+    // неявным кэшем ставить её нечем, и поле приезжает пустым - это не промах, а отсутствие платы.
+    cacheWriteTokens: usage.cacheWriteTokens,
+    costUsd: aiProvider.costUsd(cfg.model, usage),
     latencyMs: Date.now() - startedAt,
   });
 }
