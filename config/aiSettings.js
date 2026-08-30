@@ -26,6 +26,10 @@ const DEFAULT_AI_CONFIG = {
   channelMemoryRecall: 10,
   userMemoryEnabled: true,
   userMemoryMax: 10,
+  // Отношение к зрителю (−10…+10, shared/rapport.js). Умолчание ВЫКЛЮЧЕНО, в отличие от обеих
+  // памятей: те ничего не наказывают, а это меняет и то, кого мутят, и на сколько.
+  rapportEnabled: false,
+  rapportMaxMultiplier: 5,
   persona: '',
   // Правила целиком, если их переписали в панели. Пусто - работают встроенные из
   // games/aiReply.js: настройка, которую не заполняли, не может означать «без правил».

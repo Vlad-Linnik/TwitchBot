@@ -15,6 +15,7 @@
 const { connect } = require('./db.js');
 const { aiTextKey } = require('../shared/aiTextKey.js');
 const { factPriority, rankFacts } = require('../shared/memoryRecall.js');
+const rapport = require('../shared/rapport.js');
 
 let cols = null;
 
@@ -28,6 +29,7 @@ async function ensureInitialized() {
     ignored: db.collection('AiIgnoredUsers'),
     memory: db.collection('AiChannelMemory'),
     userMemory: db.collection('AiUserMemory'),
+    rapport: db.collection('AiUserRapport'),
     config: db.collection('AiConfig'),
     sessions: db.collection('StreamSessions'),
     samples: db.collection('StreamViewerSamples'),
@@ -46,6 +48,9 @@ async function ensureInitialized() {
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
     cols.userMemory.createIndex({ channel: 1, userId: 1, key: 1 }, { unique: true }),
     cols.userMemory.createIndex({ channel: 1, userId: 1, createdAt: 1 }),
+    cols.rapport.createIndex({ channel: 1, userId: 1 }, { unique: true }),
+    // Под список в панели: он сортируется по счёту, потому что интересны края шкалы, а не середина.
+    cols.rapport.createIndex({ channel: 1, score: 1 }),
   ]);
   return cols;
 }
@@ -455,6 +460,103 @@ async function forgetUserFact(channel, userId, key) {
 // не то, что на самом деле уходит в запрос. Пишущий один - тот, кому текст принадлежит.
 //
 // Сайт это поле только читает и никогда не сохраняет обратно из формы.
+// --- отношение к зрителю ---------------------------------------------------
+
+// Одно число на пару {канал, человек}: −10…+10. Что оно значит и вся арифметика вокруг него - в
+// shared/rapport.js, здесь только чтение и запись.
+//
+// КЛЮЧ ТОТ ЖЕ, ЧТО У ПАМЯТИ О ЗРИТЕЛЯХ, И ПО ТЕМ ЖЕ ПРИЧИНАМ: ники меняются, id нет, а строка живёт
+// долго. Логин лежит рядом и переписывается при каждой записи - в панели человек узнаётся по нику.
+//
+// ПУЛ ai.memoryShare РАБОТАЕТ ЗДЕСЬ ИНАЧЕ, ЧЕМ У ПАМЯТИ. Память о зрителях читается по пулу на
+// КАЖДОМ вызове: факт про человека верен в любом чате. Отношение так не переносится - это состояние
+// отношений в конкретном чате, а не свойство человека, и постоянное чтение по пулу означало бы, что
+// мут в одном канале удлиняет муты во всех остальных, пока идёт разговор. Поэтому пул участвует
+// РОВНО ОДИН РАЗ: при первом контакте строка засевается минимумом по пулу (rapport.seedScore), и с
+// этого момента живёт своей жизнью. Репутация приезжает с человеком один раз - перейти в соседний
+// чат, чтобы обнулить её, нельзя; а восстановить отношения на новом канале можно, и это правильно.
+//
+// Ротации и TTL нет намеренно: строка заводится только на том, кто дожил до платного вызова, а их
+// число уже ограничено дневным лимитом. Чистить тут нечего, и удаление строки означало бы прощение,
+// которое никто не решал выдать.
+async function getRapport(pool, channel, userId, login) {
+  const c = await ensureInitialized();
+  const id = String(userId);
+  const own = await c.rapport.findOne({ channel, userId: id });
+  if (own) {
+    return {
+      score: rapport.clampScore(own.score),
+      friend: Boolean(own.friend),
+      // Сказано ли уже человеку, что он стал другом. Переход случается ПОСЛЕ ответа, в котором он
+      // заработан, поэтому объявить его можно только в следующем разговоре, а без этой отметки -
+      // в каждом следующем.
+      friendAnnounced: Boolean(own.friendAnnounced),
+      source: own.source || 'ai',
+      seededFrom: own.seededFrom || null,
+      exists: true,
+    };
+  }
+
+  const others = (Array.isArray(pool) ? pool : [pool]).filter((ch) => ch && ch !== channel);
+  const foreign = others.length
+    ? await c.rapport
+        .find({ channel: { $in: others }, userId: id }, { projection: { score: 1, channel: 1 } })
+        .toArray()
+    : [];
+  const score = rapport.seedScore(foreign.map((r) => r.score));
+  // Откуда приехал счёт - видно в панели: без этого админ видит у новичка −6 и не может узнать,
+  // откуда они взялись. Пишется канал самой суровой строки, то есть той, которая и решила.
+  const from = foreign.length
+    ? foreign.reduce((a, b) => (rapport.clampScore(b.score) < rapport.clampScore(a.score) ? b : a)).channel
+    : null;
+  return {
+    score,
+    friend: false,
+    friendAnnounced: false,
+    source: 'ai',
+    seededFrom: score === rapport.START ? null : from,
+    exists: false,
+  };
+}
+
+// Пишется после того, как ответ уже ушёл в чат, поэтому падение здесь не должно ронять разбор
+// ответа модели: потерянный сдвиг отношения - это одна недосчитанная единица, а не потеря ответа.
+//
+// `source` переводится в 'ai' только когда счёт ДЕЙСТВИТЕЛЬНО сдвинулся. Иначе выставленное админом
+// значение переставало бы быть выставленным админом на первом же вызове, в котором модель ничего не
+// предложила, - то есть пометка исчезала бы сама по себе, ничего не изменив.
+async function setRapport(channel, userId, login, patch) {
+  try {
+    const c = await ensureInitialized();
+    const id = String(userId);
+    const set = {
+      login: String(login || ''),
+      score: rapport.clampScore(patch.score),
+      friend: Boolean(patch.friend),
+      friendAnnounced: Boolean(patch.friendAnnounced),
+      updatedAt: new Date(),
+    };
+    if (patch.changed) set.source = 'ai';
+    await c.rapport.updateOne(
+      { channel, userId: id },
+      {
+        $set: set,
+        $setOnInsert: {
+          channel,
+          userId: id,
+          // Откуда взялся стартовый счёт, если он не ноль. Только при вставке: канал-источник -
+          // это факт о рождении строки, и переписывать его позже нечем и незачем.
+          seededFrom: patch.seededFrom || null,
+          createdAt: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.error('[aiStore] setRapport failed:', err.message);
+  }
+}
+
 async function publishBuiltinPrompt(text) {
   try {
     const c = await ensureInitialized();
@@ -541,6 +643,8 @@ module.exports = {
   rememberUserFact,
   touchUserFacts,
   forgetUserFact,
+  getRapport,
+  setRapport,
   writeLog,
   recentExchanges,
   countBilledSince,
