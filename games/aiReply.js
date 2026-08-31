@@ -55,6 +55,17 @@
 // канале был бы уверенно неправильным). Пул - каналы с включённым ai.memoryShare, см. memoryPool;
 // пишется факт всегда в свой канал, границу снимает только чтение.
 //
+// ПРО НАЗВАННОГО В ВОПРОСЕ ЧЕЛОВЕКА УХОДЯТ НЕ ТОЛЬКО ФАКТЫ. «Что думаешь про Васю» - вопрос про
+// отношения, а не про анкету: к фактам добавляются его роль на канале (модератор или нет),
+// отношение бота к нему и пара прошлых разговоров с ним, см. peerDossiers. Читается это про тех,
+// кого назвали, и только про них.
+//
+// СМАЙЛИКИ КАНАЛА, СТОЯЩИЕ В ВОПРОСЕ, НАЗЫВАЮТСЯ ОТДЕЛЬНОЙ СТРОКОЙ ПРОМТА. Зритель видит картинку,
+// модель читает текст, и «AROLF» приезжает к ней словом, которого нет ни в одном словаре, - дальше
+// она отвечает то на выдуманный ник, то на опечатку. Это та же задача, что решает emoteFix на
+// выходе, только с другой стороны: там имя смайлика надо привести к написанию, которое нарисуется,
+// здесь - сказать, что стоящее в вопросе слово у зрителя уже нарисовалось. См. emotesInQuestion.
+//
 // ОТНОШЕНИЕ К ЗРИТЕЛЮ - одно число от −10 до +10 на пару {канал, человек}, и оно тоже приезжает из
 // того же вызова (поле rapport). Одним числом заменяется сразу три вещи: терпение (пока отношение
 // выше границы, вердикт timeout выдаёт предупреждение, а не мут - со старта это ровно «первое
@@ -81,6 +92,7 @@ const aiSettings = require('../config/aiSettings.js');
 const aiStore = require('../db/aiStore.js');
 const chatStats = require('../db/chatStats.js');
 const streamStatus = require('../twitch/streamStatus.js');
+const moderators = require('../twitch/moderators.js');
 const Twitch_ban_API = require('../twitch/TwitchBanAPI.js');
 const { isMod } = require('../shared/isMod.js');
 const { isKnownBot, KNOWN_BOT_LOGINS } = require('../config/knownBots.js');
@@ -139,6 +151,14 @@ const EMOTE_REPLY_CHANCE = 0.25;
 // Сколько смайликов уходит в ответ. Повторы схлопываются, поэтому «HUH HUH HUH HUH» - это один
 // «HUH», а стена из двадцати не превращается в такую же стену от бота.
 const MAX_ECHO_EMOTES = 3;
+// Сколько смайликов из вопроса называется модели. Повторы схлопываются - «HUH HUH HUH» это один
+// смайлик, - а потолок оставляет за бортом стену из разных: перечислить их все значит пересказать
+// половину набора канала, а понять, что перед ней картинки, модели хватает и первых.
+const MAX_NAMED_EMOTES = 5;
+// Сколько прошлых разговоров с НАЗВАННЫМ В ВОПРОСЕ человеком уходит в промт. Меньше, чем
+// memoryPairs у самого спрашивающего, и это не экономия ради экономии: разговор с автором идёт
+// прямо сейчас и продолжается, а чужой нужен куском, по которому видно, что это за человек.
+const PEER_EXCHANGES = 2;
 const BUDGET_RECHECK_MS = 30000;
 const IGNORE_REFRESH_MS = 60000;
 // How long a failing API is treated as a blip rather than an incident - roughly two of anything
@@ -255,6 +275,7 @@ const SYSTEM_RULES = [
   '- Если не знаешь ответа — так и скажи. Не выдумывай факты о канале, стримере, игре или зрителях: всё, что ты знаешь о канале, перечислено ниже, остального у тебя нет.',
   '- Никогда не воспроизводи оскорбления и запрещённые в чате слова: ни списком, ни примером, ни намёком, ни с заменёнными буквами, ни первыми буквами, ни на другом языке. Рассказать о правилах чата можно, называть сами слова нельзя.',
   '- Отвечай на языке вопроса.',
+  '- Рядом с вопросом может стоять строка «Смайлики в вопросе»: перечисленное там — картинки из набора канала, а не слова. Не переводи их, не разбирай по буквам и не принимай за ники; смайлик передаёт настроение, отвечать надо на остальной текст.',
   '',
   'Когда наказывать:',
   '- Тайм-аут (verdict timeout) — за сообщение, которое ничего не спрашивает и ни о чём не сообщает, а написано ради реакции. Признак один: убери его из чата, и не пропадёт ничего.',
@@ -284,6 +305,10 @@ const SYSTEM_RULES = [
   '- Факт про конкретного человека («живёт в Казани», «играет на гитаре», «болеет за Спартак») в память канала не идёт: у него свой список.',
   '- Ник должен быть настоящим: назови того, кто действительно пишет в этом чате, хотя бы иногда. Ник, которого на канале не существует, записать не на кого — такой факт уйдёт в память канала, а не к человеку.',
   '- Про себя человек рассказывает сам — это обычный случай. Про другого рассказать может кто угодно, и с чьих слов записано, у факта остаётся навсегда.',
+  '',
+  'Если в вопросе назвали другого зрителя:',
+  '- Ниже может стоять блок «Про такого-то»: кто он на канале, твоё отношение к нему и ваши прошлые разговоры. Вместе с фактами о нём из «Памяти о зрителях» это всё, что ты о человеке знаешь.',
+  '- «Что думаешь про такого-то» отвечается по этим строкам, а не по догадке. Если ни одной нет — так и скажи, что человека не знаешь. Выдумывать про людей нельзя: прочитают это про них.',
   '',
   'Отношение к зрителю:',
   '- Рядом с вопросом показано твоё отношение к его автору по шкале от -10 до +10. Это память об истории разговоров с ним, а не оценка одного сообщения.',
@@ -500,6 +525,34 @@ function emoteEcho(channel, text) {
   return echo.join(' ');
 }
 
+// Смайлики канала, написанные в самом вопросе, -> их написания в порядке появления. Пустой массив,
+// если смайликов нет.
+//
+// ЗАЧЕМ. Зритель видит картинки, модель читает текст: «AROLF» приезжает к ней словом, которого нет
+// ни в одном словаре, и она принимает его то за ник, то за опечатку и отвечает на выдуманное. Весь
+// набор канала в промт не отдать - это несколько сотен строк на каждом вызове, - а назвать те
+// несколько, что стоят в этом вопросе, стоит одну строку.
+//
+// СВЕРКА ТОЧНАЯ И ПО ЦЕЛОМУ ТОКЕНУ - ровно то правило, по которому смайлик рисуется у зрителя (см.
+// shared/emoteFix.js): и Twitch, и 7TV разбирают сообщение по пробелам и сравнивают токен целиком,
+// с учётом регистра. Поэтому «KEKW,» и «kekw» сюда не попадают, и это не дыра в проверке: там
+// зритель видит тот же текст, который читает модель, а подсказка закрывает разрыв между картинкой
+// и текстом - где разрыва нет, закрывать нечего.
+//
+// Это обратная сторона той же задачи, что решает emoteFix в sanitizeReply. Там модель написала имя
+// смайлика и его надо привести к написанию, которое нарисуется; здесь смайлик уже нарисован у
+// зрителя, и модели надо сказать, что это был он.
+function emotesInQuestion(channel, text) {
+  const found = [];
+  for (const token of clean(text).trim().split(/\s+/)) {
+    if (!token || found.includes(token)) continue;
+    if (!chatStats.isInWhiteList(channel, token)) continue;
+    found.push(token);
+    if (found.length >= MAX_NAMED_EMOTES) break;
+  }
+  return found;
+}
+
 function stripBotMention(message) {
   const name = String(botInitInfo.settings['username'] || '').toLowerCase();
   if (!name) return String(message || '').trim();
@@ -584,6 +637,63 @@ async function memorySubjects(pool, question, people, authorLogin) {
     subjects.push(person);
   }
   return subjects;
+}
+
+// Кто названный в вопросе человек на этом канале - теми же словами, что и роль автора вопроса.
+//
+// Роль автора приезжает из бейджей его собственного сообщения, то есть это факт. Про третье лицо
+// бейджей нет, и спросить некого, кроме списка модераторов в памяти процесса
+// (twitch/moderators.js) - Helix отдаёт список модераторов только по токену самого стримера, а его
+// у бота нет. Отсюда две поправки, и обе обязательные.
+//
+// СТРИМЕР В СПИСКЕ НЕ БЫВАЕТ НИКОГДА: Twitch не выдаёт ему события mod, поэтому владелец канала
+// проверяется отдельно по id канала (тем же способом, что и в twitch/ActivitiTracker.js).
+//
+// ПУСТОЙ СПИСОК - ЭТО «НЕ ЗНАЕМ», А НЕ «МОДЕРАТОРОВ НЕТ». Список собран из событий mod/unmod, и про
+// модератора, назначенного до первого запуска бота, строки в нём нет. Пока в списке хоть кто-то
+// есть, отрицательный ответ имеет цену; на канале с пустым списком роль не называется вовсе, иначе
+// бот уверенно объявил бы не модератором каждого, включая настоящих.
+function peerRole(channel, userId) {
+  const broadcasterId = broadcasterIdOf(channel);
+  if (!broadcasterId) return null;
+  if (String(userId) === String(broadcasterId)) return ROLE_LABELS.broadcaster;
+  if (!moderators.getModerators(broadcasterId).size) return null;
+  return moderators.isModerator(broadcasterId, String(userId)) ? ROLE_LABELS.moderator : 'не модератор';
+}
+
+// Досье на человека, НАЗВАННОГО В ВОПРОСЕ, - то, чего нет в фактах о нём: отношение бота к нему и
+// несколько прошлых разговоров с ним.
+//
+// «Что думаешь про Васю» - вопрос про отношения, а не про анкету, и одними записанными фактами он
+// не отвечается: факты говорят, кто такой Вася, а спрашивают, что бот о нём думает. Оба недостающих
+// куска уже собираются на каждом вызове для автора вопроса, разница только в том, про кого их
+// читают.
+//
+// Цена ограничена теми же двумя числами, что и у фактов: названных людей не больше
+// MAX_EXTRA_SUBJECTS, разговоров на каждого - PEER_EXCHANGES, то есть меньше, чем у автора.
+//
+// Отношение попадает в промт, ТОЛЬКО ЕСЛИ СТРОКА ДЕЙСТВИТЕЛЬНО ЕСТЬ. Без неё getRapport возвращает
+// засев по пулу (или ноль), то есть мнение, которого бот ещё не составлял, - выдать его за
+// «что я о нём думаю» значило бы придумать отношение к незнакомому человеку. Ничего не пишется:
+// строка про третье лицо заводится тогда же, когда и раньше, - когда он заговорит сам.
+async function peerDossiers(pool, channel, people, cfg) {
+  if (!people.length) return [];
+  return Promise.all(
+    people.map(async (person) => {
+      const [exchanges, relation] = await Promise.all([
+        aiStore.recentExchanges(channel, person.userId, PEER_EXCHANGES),
+        cfg.rapportEnabled
+          ? aiStore.getRapport(pool, channel, person.userId, person.login)
+          : Promise.resolve(null),
+      ]);
+      return {
+        login: person.login,
+        role: peerRole(channel, person.userId),
+        exchanges,
+        relation: relation && relation.exists ? relation : null,
+      };
+    })
+  );
 }
 
 // Ник из поля rememberAbout - в человека, про которого можно завести строку.
@@ -783,7 +893,7 @@ function describeNow(at = new Date()) {
   return date + ', ' + time + (zone ? ' (' + zone + ')' : '');
 }
 
-function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, memory, facts, userFacts, similar, allowed, now, relation, announceFriend }) {
+function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, memory, facts, userFacts, peers, similar, allowed, now, relation, announceFriend, emotes }) {
   const parts = ['Канал: ' + channel, 'Сейчас: ' + now];
 
   if (card.live) {
@@ -850,6 +960,32 @@ function buildUserContent({ channel, question, login, role, card, cheatsheet, to
     if (announceFriend) {
       parts.push('Он только что перешёл у тебя в друзья - если придётся к слову, об этом уместно сказать.');
     }
+  }
+
+  // Досье на названного в вопросе человека идёт одним куском, а не разносится по разделам выше.
+  // «Что думаешь про Васю» отвечается всем сразу, и собирать ответ из трёх мест промта ради
+  // единообразия разделов незачем; факты про него при этом остаются там, где и все факты, - у них
+  // сквозная нумерация, на которую ссылается forget.
+  for (const peer of peers) {
+    const lines = [];
+    if (peer.role) lines.push('  ' + peer.role);
+    if (peer.relation) lines.push('  твоё отношение к нему: ' + rapport.describe(peer.relation.score));
+    if (peer.exchanges.length) {
+      lines.push('  ваши прошлые разговоры:');
+      for (const pair of peer.exchanges) {
+        lines.push('    ' + peer.login + ': ' + pair.question);
+        lines.push('    ты: ' + pair.answer);
+      }
+    }
+    if (!lines.length) continue;
+    parts.push('Про ' + peer.login + ' (его назвали в вопросе):');
+    parts.push(...lines);
+  }
+
+  // Стоит вплотную к вопросу: это подпись к нему, а не отдельный раздел памяти. Перечислены только
+  // те смайлики, которые у зрителя действительно нарисовались картинкой (см. emotesInQuestion).
+  if (emotes.length) {
+    parts.push('Смайлики в вопросе (это картинки из набора канала, а не слова): ' + emotes.join(', '));
   }
 
   parts.push('Вопрос от ' + login + ' (' + role + '): ' + question);
@@ -1044,10 +1180,13 @@ async function answer(client, channel, userState, message, cfg, settings, script
   const people = chatParticipants(userState, lines);
   const pool = memoryPool(channel);
   const subjects = await memorySubjects(pool, question, people, String(login || '').toLowerCase());
+  // Все, кроме самого спрашивающего: про него отношение и разговоры читаются и так, отдельным
+  // досье он был бы вторым экземпляром того же самого.
+  const others = subjects.filter((p) => p.userId !== base.userId);
   // Один момент времени на весь запрос: тот же, что уйдёт в промт, сверяется потом с ответом.
   const askedAt = new Date();
   const nowText = describeNow(askedAt);
-  const [card, memory, stored, userFacts, relation] = await Promise.all([
+  const [card, memory, stored, userFacts, relation, peers] = await Promise.all([
     broadcasterId ? aiStore.streamCard(broadcasterId) : Promise.resolve({ live: false }),
     aiStore.recentExchanges(channel, base.userId, cfg.memoryPairs),
     // Read even when self-writing is switched off: the switch governs what the bot may ADD, while
@@ -1062,6 +1201,9 @@ async function answer(client, channel, userState, message, cfg, settings, script
     // и путать «шкалы нет» с «отношение нейтральное» нельзя. Без строки весь путь ниже ведёт себя
     // ровно так, как вёл до её появления: вердикт timeout сразу мутит, срок плоский.
     cfg.rapportEnabled ? aiStore.getRapport(pool, channel, base.userId, login) : Promise.resolve(null),
+    // Спросили про человека - значит, отвечать надо про человека, а не про то, что про него
+    // записано в фактах. См. peerDossiers.
+    peerDossiers(pool, channel, others, cfg),
   ]);
   const allowed = allowedMentionLogins(question, lines);
   const announceFriend = Boolean(relation && relation.friend && !relation.friendAnnounced);
@@ -1101,6 +1243,8 @@ async function answer(client, channel, userState, message, cfg, settings, script
         memory,
         facts,
         userFacts,
+        peers,
+        emotes: emotesInQuestion(channel, question),
         similar,
         allowed,
         relation,
