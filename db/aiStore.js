@@ -160,6 +160,36 @@ async function recentAnswers(channel, limit) {
     .toArray();
 }
 
+// Заготовка устарела: стереть её или переписать. Возвращает число тронутых строк.
+//
+// ПРАВЯТСЯ ВСЕ СТРОКИ КАНАЛА С ЭТИМ ОТВЕТОМ, а не одна показанная модели. Путь cacheSimilar
+// заводит на один и тот же ответ новый ключ при каждой новой формулировке вопроса, поэтому у
+// прижившегося ответа строк обычно несколько; удалив одну, мы оставили бы близнецов, которые
+// отвечают тем же самым и мгновенно - то есть починка была бы незаметной и неполной.
+//
+// Совпадение по тексту ответа, а не по ключу вопроса, потому что устаревает именно утверждение:
+// «стрим в 19:00» неверно во всех формулировках сразу. Ценой этого два разных вопроса с
+// одинаковым коротким ответом («да», «не знаю») чинятся вместе - строка стоит один вызов модели
+// и заводится заново при следующем вопросе, так что цена ошибки здесь ровно один вызов.
+//
+// `hits` и `lastHitAt` при замене не сбрасываются: они про то, как часто СПРАШИВАЮТ, а спрашивать
+// стали не реже оттого, что ответ переписали. По ним же работает вытеснение.
+async function fixCachedAnswer(channel, staleAnswer, replacement) {
+  const c = await ensureInitialized();
+  const answer = String(staleAnswer || '');
+  if (!answer) return 0;
+  const text = String(replacement || '');
+  if (text) {
+    // fixedAt - единственный след того, что строку переписала модель, а не записал первый ответ на
+    // этот вопрос: страница кэша в панели показывает текст, и без отметки исправленная строка
+    // неотличима от исходной.
+    const res = await c.cache.updateMany({ channel, answer }, { $set: { answer: text, fixedAt: new Date() } });
+    return res.modifiedCount || 0;
+  }
+  const res = await c.cache.deleteMany({ channel, answer });
+  return res.deletedCount || 0;
+}
+
 // --- ignore list -----------------------------------------------------------
 
 async function isIgnored(channel, userId) {
@@ -630,6 +660,7 @@ module.exports = {
   addFilterEntry,
   findCachedAnswer,
   cacheAnswer,
+  fixCachedAnswer,
   recentAnswers,
   publishBuiltinPrompt,
   isIgnored,
