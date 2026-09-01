@@ -8,7 +8,7 @@
 // подтвердил - за месяцы работы в таблице накопилось девять строк, то есть «переучивание» стоит
 // девять вызовов на канал. Утечка чужого ответа в чужой чат стоит дороже.
 //
-// This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog / AiIgnoredUsers /
+// This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog /
 // AiChannelMemory / AiUserMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js)
 // but the bot is what writes them at runtime. Channel keys carry the leading '#', the same convention as every
 // other chat-stat collection in this database.
@@ -26,7 +26,6 @@ async function ensureInitialized() {
     filter: db.collection('AiFilter'),
     cache: db.collection('AiAnswerCache'),
     log: db.collection('AiReplyLog'),
-    ignored: db.collection('AiIgnoredUsers'),
     memory: db.collection('AiChannelMemory'),
     userMemory: db.collection('AiUserMemory'),
     rapport: db.collection('AiUserRapport'),
@@ -43,7 +42,6 @@ async function ensureInitialized() {
     cols.cache.createIndex({ channel: 1, lastHitAt: -1, createdAt: -1 }),
     cols.log.createIndex({ channel: 1, userId: 1, createdAt: -1 }),
     cols.log.createIndex({ createdAt: -1 }),
-    cols.ignored.createIndex({ channel: 1, userId: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, key: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
     cols.userMemory.createIndex({ channel: 1, userId: 1, key: 1 }, { unique: true }),
@@ -190,30 +188,26 @@ async function fixCachedAnswer(channel, staleAnswer, replacement) {
   return res.deletedCount || 0;
 }
 
-// --- ignore list -----------------------------------------------------------
+// --- кто на дне шкалы ------------------------------------------------------
 
-async function isIgnored(channel, userId) {
+// Все, к кому отношение на дне, разом - ключами «канал|userId». games/aiReply.js держит их в
+// памяти, потому что решение «каким путём идёт это сообщение» синхронное, а обращение к базе на
+// каждое упоминание не купило бы ничего. Список короткий по своей природе: на дно надо упасть.
+//
+// Индекса под этот запрос нет намеренно. Существующий {channel: 1, score: 1} его не обслуживает -
+// канал тут не задан, а без ведущего поля составной индекс не работает, - но строка в этой таблице
+// заводится только на том, кто дожил до платного вызова, так что их десятки, а читаем мы раз в
+// минуту на процесс. Свой индекс по score оплачивался бы на каждом сдвиге отношения, то есть на
+// каждом ответе, ради экономии на просмотре трёх десятков строк.
+//
+// Порог передаётся снаружи, а не зашит здесь: он живёт в shared/rapport.js вместе с остальными
+// числами шкалы, и второй его копии тут быть не должно.
+async function listHostileKeys(floor) {
   const c = await ensureInitialized();
-  const doc = await c.ignored.findOne({ channel, userId: String(userId) });
-  return Boolean(doc);
-}
-
-// The whole list at once, as "channel|userId" keys. games/aiReply.js keeps it in memory so that
-// deciding whether to answer stays a synchronous check - the list is permanent and small, and a
-// Mongo round trip per mention would buy nothing.
-async function listIgnoredKeys() {
-  const c = await ensureInitialized();
-  const rows = await c.ignored.find({}, { projection: { channel: 1, userId: 1 } }).toArray();
+  const rows = await c.rapport
+    .find({ score: { $lte: rapport.clampScore(floor) } }, { projection: { channel: 1, userId: 1 } })
+    .toArray();
   return rows.map((r) => r.channel + '|' + r.userId);
-}
-
-async function ignoreUser(channel, userId, login, reason) {
-  const c = await ensureInitialized();
-  await c.ignored.updateOne(
-    { channel, userId: String(userId) },
-    { $setOnInsert: { channel, userId: String(userId), login, reason: String(reason || ''), createdAt: new Date() } },
-    { upsert: true }
-  );
 }
 
 // --- channel memory --------------------------------------------------------
@@ -663,9 +657,7 @@ module.exports = {
   fixCachedAnswer,
   recentAnswers,
   publishBuiltinPrompt,
-  isIgnored,
-  listIgnoredKeys,
-  ignoreUser,
+  listHostileKeys,
   listMemory,
   rememberFact,
   touchFacts,
