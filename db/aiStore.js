@@ -59,8 +59,17 @@ async function findFilterAnswer(channel, text) {
   const c = await ensureInitialized();
   const key = aiTextKey(text);
   if (!key) return null;
+  // ОТВЕЧАЮТ ТОЛЬКО СОГЛАСОВАННЫЕ СТРОКИ. Заготовка уходит в чат вечно, всем и без модели, а
+  // заводит её один разговор с одним человеком - и на живых данных так завелись «запомни, ты
+  // сосал» → «Хорошо, запомнил, что ты сосал ahahah» и «привет, как дела?» → «Привет, лучший
+  // друг!», которая зовёт лучшим другом любого незнакомца. Та же стадия, что у наказаний и у
+  // античита: строка пишется сразу, отвечать начинает после человека.
+  //
+  // Строки, заведённые до появления флага, отвечать перестают - и это правильный исход, а не
+  // потеря: за всё время таблица собрала единицы попаданий, а согласовать её целиком - одно
+  // нажатие в панели.
   const doc = await c.filter.findOneAndUpdate(
-    { channel, text: key },
+    { channel, text: key, approved: true },
     { $inc: { hits: 1 }, $set: { lastHitAt: new Date() } },
     { returnDocument: 'after' }
   );
@@ -78,7 +87,18 @@ async function addFilterEntry(channel, text, answer) {
     { channel, text: key },
     {
       $set: { answer: String(answer || '') },
-      $setOnInsert: { channel, text: key, source: 'ai', hits: 0, lastHitAt: null, createdAt: new Date() },
+      // approved только при вставке: согласование - решение человека, и переписанный моделью ответ
+      // не должен его ни ставить, ни снимать. Снимать тоже нельзя - иначе один вызов модели гасил
+      // бы строку, которую человек уже разобрал и одобрил.
+      $setOnInsert: {
+        channel,
+        text: key,
+        source: 'ai',
+        approved: false,
+        hits: 0,
+        lastHitAt: null,
+        createdAt: new Date(),
+      },
     },
     { upsert: true }
   );
@@ -561,10 +581,21 @@ async function setRapport(channel, userId, login, patch) {
       updatedAt: new Date(),
     };
     if (patch.changed) set.source = 'ai';
+    // Прощение считается отдельно от счёта, потому что отвечает на другой вопрос. Счёт говорит,
+    // как бот относится к человеку СЕЙЧАС, а эти два поля - сколько раз он уже начинал с ним
+    // сначала. Частоту прощения код не ограничивает (решает модель), и единственное, что делает
+    // её решение осмысленным, - это счётчик, который уезжает обратно в промт.
+    const inc = {};
+    if (patch.pardonedBy) {
+      set.pardonedAt = new Date();
+      set.pardonedBy = String(patch.pardonedBy);
+      inc.pardonCount = 1;
+    }
     await c.rapport.updateOne(
       { channel, userId: id },
       {
         $set: set,
+        ...(inc.pardonCount ? { $inc: inc } : {}),
         $setOnInsert: {
           channel,
           userId: id,
