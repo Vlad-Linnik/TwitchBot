@@ -131,6 +131,20 @@ const CHAT_CONTEXT_LINES = 10;
 // Потолок длины одной такой строки. Обстановка - это кто о чём говорит, а не пересказ чужой стены
 // текста: десять сообщений по пятьсот знаков стоили бы дороже всей памяти канала разом.
 const MAX_CHAT_LINE_CHARS = 200;
+// Сколько последних ответов бота в канале просматривается ради их ЗАЧИНОВ и сколько первых слов
+// берётся от каждого.
+//
+// Замер на проде (911 ответов модели за пять дней): 26% начинались с междометия («ой», «ох»,
+// «ого») или с «опять», причём «опять ты со своими» встретилось 31 раз, а «ох, дружище» - 27.
+// Однообразие сидело именно в первых словах: длина (медиана 97 знаков) и доля встречных вопросов
+// (28%) выглядели здоровыми. Отсюда и лечение - показать модели её собственные зачины, а не
+// заводить отдельные правила под разные типы сообщений: разные правила не мешают начать с «ой» и
+// приветствие, и вопрос про игру.
+//
+// Три слова - тот отрезок, на котором «ой, да я больше по...» и «ой, ну ты даёшь» опознаются как
+// один и тот же заход, а два разных ответа ещё не слипаются в один.
+const RECENT_REPLIES_SCAN = 10;
+const OPENING_WORDS = 3;
 const MAX_TIMEOUT_REASON_CHARS = 60;
 // Во сколько раз бот перевыполняет просьбу замутить самого себя. В этом вся шутка, и модель об
 // этом знает - иначе её ответ обещал бы не то, что произойдёт.
@@ -354,6 +368,7 @@ const SYSTEM_RULES = [
   '- Если не знаешь ответа — так и скажи. Не выдумывай факты о канале, стримере, игре или зрителях: всё, что ты знаешь о канале, перечислено ниже, остального у тебя нет.',
   '- Честное «не знаю» — это законченный ответ. Не переводи разговор на игру, в которую играет стример, и вообще не меняй тему, чтобы прикрыть незнание: спросили про аниме — отвечай про аниме, а не «зато смотри, как он в доту потеет».',
   '- Встречный вопрос — дело добровольное. Он уместен, когда тебе правда интересно продолжение, и неуместен в каждом сообщении подряд: ответ, к которому он приделан для галочки, читается как отписка.',
+  '- Не повторяй собственные зачины. Ниже может стоять список того, чем ты начинал последние ответы в этом чате, — начни иначе. Междометие первым словом («ой», «ох», «ого») и укор «опять ты» заметнее всего: из них в чате складывается ощущение, что на любое сообщение отвечает одна и та же фраза.',
   '- Списки «О канале» и «Память канала» — это то, чем ты ОТВЕЧАЕШЬ, а не список тем, к которым надо свести разговор. Если к вопросу они не подходят, значит, они тут просто ни при чём.',
   '- Никогда не воспроизводи оскорбления и запрещённые в чате слова: ни списком, ни примером, ни намёком, ни с заменёнными буквами, ни первыми буквами, ни на другом языке. Рассказать о правилах чата можно, называть сами слова нельзя.',
   '- Отвечай на языке вопроса.',
@@ -1006,6 +1021,34 @@ function requestedMute(out) {
   return { name, seconds: Math.min(MAX_REQUESTED_MUTE_SECONDS, seconds) };
 }
 
+// Зачин ответа: первые слова без знаков препинания и регистра. Сравнивать зачины как есть нельзя -
+// «Ой, да ладно» и «ой да ладно тебе» это один и тот же заход, отличающийся запятой.
+function openingOf(text) {
+  const words = String(text || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  return words.slice(0, OPENING_WORDS).join(' ');
+}
+
+// Зачины последних ответов - так, как они уходят в промт: без повторов, свежие впереди, и с числом
+// повторений у тех, что уже повторялись.
+//
+// Повтор схлопывается, а не занимает три строки списка: одинаковые строки в перечне читаются как
+// шум и стоят токенов, а «×3» рядом с зачином говорит ровно то, ради чего список и показывают.
+function recentOpenings(replies) {
+  const counts = new Map();
+  for (const reply of replies) {
+    const opening = openingOf(reply);
+    if (!opening) continue;
+    counts.set(opening, (counts.get(opening) || 0) + 1);
+  }
+  return [...counts.entries()].map(([opening, times]) => (times > 1 ? opening + ' ×' + times : opening));
+}
+
 function sanitizeReason(text) {
   return String(text || '')
     .replace(/\s+/g, ' ')
@@ -1122,7 +1165,7 @@ function describePardons(relation, at = new Date()) {
   return 'ты уже прощал его ' + times + ', последний раз ' + when;
 }
 
-function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, memory, facts, userFacts, peers, similar, allowed, now, relation, announceFriend, emotes, chat }) {
+function buildUserContent({ channel, question, login, role, card, cheatsheet, tone, memory, facts, userFacts, peers, similar, allowed, now, relation, announceFriend, emotes, openings, chat }) {
   const parts = ['Канал: ' + channel, 'Сейчас: ' + now];
 
   if (card.live) {
@@ -1212,6 +1255,14 @@ function buildUserContent({ channel, question, login, role, card, cheatsheet, to
     if (!lines.length) continue;
     parts.push('Про ' + peer.login + ' (его назвали в вопросе):');
     parts.push(...lines);
+  }
+
+  // Чем бот начинал последние ответы в этом чате. Это не справка, а запрет на повтор, и лежит он
+  // в переменной части запроса намеренно: список меняется с каждым ответом, а системный текст -
+  // это кэшируемый префикс, и подстановка в него стоила бы кэша на каждом вызове. Само правило
+  // («начни иначе») стоит там, где ему и место, - во встроенных правилах.
+  if (openings && openings.length) {
+    parts.push('Так ты начинал последние ответы в этом чате - начни иначе: ' + openings.join(' / '));
   }
 
   // Обстановка: что говорили в чате перед вопросом. Стоит последней из всех справок и вплотную к
@@ -1440,7 +1491,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
   // Один момент времени на весь запрос: тот же, что уйдёт в промт, сверяется потом с ответом.
   const askedAt = new Date();
   const nowText = describeNow(askedAt);
-  const [card, memory, stored, userFacts, relation, peers] = await Promise.all([
+  const [card, memory, stored, userFacts, relation, peers, replies] = await Promise.all([
     broadcasterId ? aiStore.streamCard(broadcasterId) : Promise.resolve({ live: false }),
     aiStore.recentExchanges(channel, base.userId, cfg.memoryPairs),
     // Read even when self-writing is switched off: the switch governs what the bot may ADD, while
@@ -1458,6 +1509,9 @@ async function answer(client, channel, userState, message, cfg, settings, script
     // Спросили про человека - значит, отвечать надо про человека, а не про то, что про него
     // записано в фактах. См. peerDossiers.
     peerDossiers(pool, channel, others, cfg),
+    // Последние ответы бота в этом чате - ради их зачинов, см. recentOpenings. Всего канала, а не
+    // этого зрителя: повторяющийся заход виден чату целиком, а не каждому по отдельности.
+    aiStore.recentReplies(channel, RECENT_REPLIES_SCAN),
   ]);
   const allowed = allowedMentionLogins(question, lines);
   const announceFriend = Boolean(relation && relation.friend && !relation.friendAnnounced);
@@ -1503,6 +1557,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
         allowed,
         relation,
         announceFriend,
+        openings: recentOpenings(replies),
         chat: chatContext(lines, login, message),
       }),
     });

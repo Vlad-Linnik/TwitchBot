@@ -41,6 +41,10 @@ async function ensureInitialized() {
     // Для выборки «о чём этого канала уже спрашивали» - см. recentAnswers ниже.
     cols.cache.createIndex({ channel: 1, lastHitAt: -1, createdAt: -1 }),
     cols.log.createIndex({ channel: 1, userId: 1, createdAt: -1 }),
+    // Под recentReplies: индекс выше начинается с channel, но userId стоит между ним и временем,
+    // поэтому порядок по createdAt из него не берётся - выборка «последние ответы канала» без
+    // этого сортировала бы в памяти.
+    cols.log.createIndex({ channel: 1, createdAt: -1 }),
     cols.log.createIndex({ createdAt: -1 }),
     cols.memory.createIndex({ channel: 1, key: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
@@ -650,6 +654,29 @@ async function recentExchanges(channel, userId, limit) {
   return rows.reverse().map((r) => ({ question: r.question, answer: r.answer }));
 }
 
+// Последние ответы бота в ЭТОМ КАНАЛЕ, кому бы они ни были адресованы. Не разговор и не память:
+// нужны они ради одного - чтобы модель видела, чем сама недавно начинала, и начала иначе. Что с
+// ними делать дальше, решает games/aiReply.js, здесь только выборка.
+//
+// Берутся только ушедшие в чат: ответ, которого никто не видел, повторить не страшно.
+// Смайликовые отзвуки исключены - это не ответ, а эхо, и зачина у них нет.
+//
+// Ответы из кэша и фильтра попадают сюда наравне с ответами модели, и это намеренно: в чате они
+// выглядят такими же репликами бота, а повторяться бот не должен ни за собой, ни за заготовкой.
+async function recentReplies(channel, limit) {
+  const c = await ensureInitialized();
+  if (!limit) return [];
+  const rows = await c.log
+    .find(
+      { channel, sent: true, source: { $ne: 'emote' }, answer: { $nin: [null, ''] } },
+      { projection: { answer: 1 } }
+    )
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .toArray();
+  return rows.map((r) => String(r.answer));
+}
+
 // Counts only rows that actually reached the API. A filter or cache hit still writes a row (it is
 // part of the conversation, and of the memory) but it cost nothing, so it must not eat the budget.
 async function countBilledSince(since) {
@@ -701,6 +728,7 @@ module.exports = {
   setRapport,
   writeLog,
   recentExchanges,
+  recentReplies,
   countBilledSince,
   streamCard,
 };
