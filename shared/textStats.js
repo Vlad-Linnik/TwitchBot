@@ -89,6 +89,95 @@ function isCommandMessage(message) {
   return /^\s*[!#]/.test(clean(message));
 }
 
+// ---------------------------------------------------------------------------------------
+// Twitch's `gifs` tag - T2/T3 subscriber GIFs, launched 2026-09-01 (GIPHY partnership).
+//
+// Shape is the `emotes` tag's: comma-separated `<start>-<end>|<gifID>|<gifURL>`. The message
+// text at that span is the GIPHY title in square brackets, e.g.
+//
+//   gifs=0-33|joSNxeswxuc74Juo8X|https://media4.giphy.com/... :[Y A Y Yes GIF by Djemilah Birnie]
+//
+// which is ordinary text to a tokenizer. Left alone, every GIF sent puts "gif" plus the GIF
+// author's name into the word cloud ("gif" is exactly MIN_WORD_LENGTH and not a stopword, so it
+// passes), and on an active channel it climbs the cloud fast. A blanket stopword is the wrong
+// fix - it would also silence someone genuinely typing about gifs, and would not touch the
+// author's name. THE TAG IS THE ONLY THING separating a real GIF from a viewer who typed those
+// brackets by hand, which is why it has to be carried as far as the tokenizer.
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Parse the raw `gifs` tag into `{start, end, id, url}` rows. Unparseable entries are dropped
+ * rather than guessed at - a bad row must not silently shift the spans of the good ones.
+ *
+ * @param {string} [tag] - userState.gifs, straight off tmi.js (verified: tmi.js 1.8.5 passes
+ *   this unknown tag through to userState untouched).
+ * @returns {{start: number, end: number, id: string, url: string}[]}
+ */
+function parseGifTag(tag) {
+  if (!tag || typeof tag !== 'string') return [];
+
+  const out = [];
+  for (const entry of tag.split(',')) {
+    if (!entry) continue;
+    // The URL carries query params with their own '|'-free but ':'-heavy syntax, so split on the
+    // first two separators only and let the rest of the string be the URL verbatim.
+    const first = entry.indexOf('|');
+    if (first < 0) continue;
+    const second = entry.indexOf('|', first + 1);
+    if (second < 0) continue;
+
+    const range = entry.slice(0, first);
+    const id = entry.slice(first + 1, second);
+    const url = entry.slice(second + 1);
+
+    const dash = range.indexOf('-');
+    if (dash < 0) continue;
+    const start = Number(range.slice(0, dash));
+    const end = Number(range.slice(dash + 1));
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) continue;
+    if (!id) continue;
+
+    out.push({ start, end, id, url });
+  }
+  return out;
+}
+
+/**
+ * The message with its GIF spans blanked out, for STAT purposes only. The text stored in
+ * `messages` stays exactly as sent - this is what feeds the word/mention/emote counters.
+ *
+ * Spans become spaces rather than being deleted, so "text[GIF Title]more" cannot fuse two
+ * neighbouring tokens into one invented word.
+ *
+ * @param {string} message
+ * @param {{start: number, end: number}[]} [gifs] - from parseGifTag(), or the `gifs` field
+ *   stored on the message document.
+ * @returns {string}
+ */
+function stripGifSpans(message, gifs) {
+  const text = String(message ?? '');
+  if (!Array.isArray(gifs) || gifs.length === 0) return text;
+
+  // Positions index CODE POINTS, not UTF-16 units, so an astral character anywhere before the
+  // span (an emoji in a GIF title, or in the text next to it) would shift every later index if
+  // this used plain string slicing.
+  const chars = Array.from(text);
+  const cut = new Array(chars.length).fill(false);
+
+  for (const gif of gifs) {
+    const start = Number(gif?.start);
+    const end = Number(gif?.end);
+    // A span that does not fit the message means our idea of the positions disagrees with
+    // Twitch's. Drop the whole message from the stats rather than cut at a guessed offset: the
+    // cost is a few genuine words, the alternative is the pollution this function exists to stop.
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return '';
+    if (start < 0 || end < start || end >= chars.length) return '';
+    for (let i = start; i <= end; i++) cut[i] = true;
+  }
+
+  return chars.map((ch, i) => (cut[i] ? ' ' : ch)).join('');
+}
+
 /**
  * Distinct, stat-worthy words in a message, lowercased.
  *
@@ -192,6 +281,8 @@ const LIFETIME_BUCKET = new Date(0);
 
 module.exports = {
   clean,
+  parseGifTag,
+  stripGifSpans,
   extractWords,
   extractMentions,
   isCommandMessage,

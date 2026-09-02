@@ -1,5 +1,5 @@
 const { connect } = require('./db.js');
-const { extractWords, extractMentions, dayBucket, LIFETIME_BUCKET } = require('../shared/textStats.js');
+const { extractWords, extractMentions, parseGifTag, stripGifSpans, dayBucket, LIFETIME_BUCKET } = require('../shared/textStats.js');
 const { isKnownBot } = require('../config/knownBots.js');
 
 const MIN_TIMEOUT_MS = 1000; // 1 second, Twitch's shortest timeout
@@ -465,6 +465,9 @@ class ChatStats {
     return this.emoteExclusionCache.get(channel)?.has(String(token).toLowerCase()) ?? false;
   }
 
+  // `message` here is the STAT text, not the raw line: addMessage() has already blanked out any
+  // GIF spans (shared/textStats.js). Passing a raw line with a GIF in it puts the GIPHY title's
+  // words into the cloud.
   bufferTextStats(userId, userName, message, channel, timestamp) {
     const day = dayBucket(timestamp).getTime();
 
@@ -1024,16 +1027,30 @@ class ChatStats {
     );
   }
 
-  async addMessage(userId, userName, message, channel) {
+  // `gifsTag` is Twitch's raw `gifs` tag (T2/T3 subscriber GIFs). It is stored parsed and, more
+  // importantly, kept OUT of the text stats: see shared/textStats.js. The tag is the only thing
+  // that tells a real GIF from a viewer typing the same bracketed title by hand, so it is stored
+  // rather than merely consumed - the site's per-user word cloud tokenizes `messages` at READ
+  // time (TwitchBot-Web/db/wordStatsRepo.js) and would otherwise re-introduce exactly the
+  // pollution stripped here. The GIF's id and URL exist nowhere else once the line is written.
+  async addMessage(userId, userName, message, channel, gifsTag) {
     await this.ensureInitialized();
-    
+
     const timestamp = new Date();
+    const gifs = parseGifTag(gifsTag);
+    // Everything the stat counters below see, with the GIF titles blanked out. The document
+    // itself keeps `message` verbatim - it is what the viewer actually sent, and the site
+    // displays it.
+    const statText = stripGifSpans(message, gifs);
+
     this.messagesCollection.insertOne({
       userId,
       userName,
       message,
       channel,
-      timestamp
+      timestamp,
+      // Absent on the overwhelming majority of messages; only set when Twitch says so.
+      ...(gifs.length > 0 ? { gifs } : {})
     }).catch(err => console.error('[DB] messagesCollection insert error:', err));
 
     this.userLifetimeStats.updateOne(
@@ -1048,12 +1065,12 @@ class ChatStats {
     // Word-frequency + @mention counters for the web panel's clouds and mention tracker.
     // Purely in-memory here (no await, no I/O) - the actual Mongo write is the coalesced
     // flush a few seconds later, so this costs the chat path a tokenize and a few Map sets.
-    this.bufferTextStats(userId, userName, message, channel, timestamp);
+    this.bufferTextStats(userId, userName, statText, channel, timestamp);
 
     // Twitch only ever renders emotes/smileys as their own whitespace-delimited
     // token anyway, so a plain split is enough - no regex needed.
     const candidateWords = new Set();
-    for (const token of message.trim().split(/\s+/)) {
+    for (const token of statText.trim().split(/\s+/)) {
       if (token.length > 0) candidateWords.add(token);
     }
 
