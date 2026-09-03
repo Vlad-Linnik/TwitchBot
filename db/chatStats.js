@@ -1,5 +1,5 @@
 const { connect } = require('./db.js');
-const { extractWords, extractMentions, parseGifTag, stripGifSpans, dayBucket, LIFETIME_BUCKET } = require('../shared/textStats.js');
+const { extractWords, extractMentions, parseGifTag, stripGifSpans, parseEmotesTag, dayBucket, LIFETIME_BUCKET } = require('../shared/textStats.js');
 const { isKnownBot } = require('../config/knownBots.js');
 
 const MIN_TIMEOUT_MS = 1000; // 1 second, Twitch's shortest timeout
@@ -64,6 +64,13 @@ const KEY_SEP = '\u0000';
 // one coalesced bulkWrite. See ChatStats.bufferTextStats() for why this buffer exists.
 const TEXT_STATS_FLUSH_INTERVAL_MS = 5000;
 
+// The whitelist `source` of an emote nobody configured: a Twitch emote seen in this channel's
+// chat that belongs to some OTHER broadcaster's set - a sub emote of a channel a viewer here
+// subscribes to, or its bits/follower emotes. Every other source is a list somebody fetched;
+// this one is learnt from the `emotes` tag one message at a time, so no sync ever owns these
+// rows and none of them may be pruned as "stale" (the same standing 'manual' rows have).
+const EXTERNAL_EMOTE_SOURCE = 'twitch-external';
+
 class ChatStats {
   constructor() {
     this.dbInitialized = false;
@@ -107,6 +114,14 @@ class ChatStats {
     // которая должна не спросить «смайлик ли это», а получить ПРАВИЛЬНОЕ написание для «kekw».
     // Всегда пересобирается вместе с whiteListCache, потому что отвечает про тот же набор.
     this.emoteSpellingCache = new Map();
+    // Четвёртый взгляд, и единственный, который держится ОТДЕЛЬНО от whiteListCache: смайлики
+    // Twitch, замеченные в чате, но принадлежащие чужому каналу (см. EXTERNAL_EMOTE_SOURCE).
+    // Канал -> Map(написание -> id смайлика). Считаются они наравне со своими, а вот в
+    // whiteListCache им нельзя: из него берётся написание для ОТВЕТА бота (shared/emoteFix.js),
+    // а чужой подписочный смайлик у бота не нарисуется - подписки-то у него нет.
+    // id хранится потому, что он единственный ключ к картинке: сайт достаёт свои смайлики из
+    // Helix и 7TV по имени, а чужого подписочного нет ни в одном наборе, который он читает.
+    this.externalEmoteCache = new Map();
   }
 
   async initialize() {
@@ -219,7 +234,15 @@ class ChatStats {
       await this.streamViewerSamples.createIndex({ channelId: 1, timestamp: 1 }, { unique: true });
       const list = await this.whiteListCollection.find({}).toArray();
       this.whiteListCache = new Map();
+      this.externalEmoteCache = new Map();
       for (const item of list) {
+        // Чужие подписочные - в свой кэш, а не в набор канала: считаются они так же, но
+        // написание для ответа бота должно браться только из того, что бот может отправить.
+        if (item.source === EXTERNAL_EMOTE_SOURCE) {
+          if (!this.externalEmoteCache.has(item.channel)) this.externalEmoteCache.set(item.channel, new Map());
+          this.externalEmoteCache.get(item.channel).set(item.word, item.emoteId);
+          continue;
+        }
         if (!this.whiteListCache.has(item.channel)) this.whiteListCache.set(item.channel, new Set());
         this.whiteListCache.get(item.channel).add(item.word);
       }
@@ -821,6 +844,133 @@ class ChatStats {
     return this.whiteListCache.get(channel)?.has(word) ?? false;
   }
 
+  // Считается ли токен смайликом ЭТОГО канала: свой набор плюс чужие подписочные, замеченные
+  // здесь в чате. Одна проверка на оба множества, потому что для счётчиков разницы нет - обе
+  // половины попадают в один и тот же индекс `words`/WordLifetimeStats.
+  isCountedEmote(channel, word) {
+    return this.isInWhiteList(channel, word) || (this.externalEmoteCache.get(channel)?.has(word) ?? false);
+  }
+
+  /**
+   * Заводит в реестр смайлики Twitch, которых у канала нет в наборе (см. EXTERNAL_EMOTE_SOURCE).
+   *
+   * Синхронная часть - кэши, и это не оптимизация: вызывающий (addMessage) сразу после этого
+   * считает слова и смайлики ТОГО ЖЕ сообщения, а первое появление смайлика должно быть уже
+   * смайликом. Она же и защита от гонки: имя, положенное в кэш здесь, не даст соседнему
+   * сообщению завести строку второй раз, пока не вернулась запись в базу.
+   *
+   * @param {{id: string, name: string}[]} emotes - из shared/textStats.js parseEmotesTag.
+   */
+  learnExternalEmotes(channel, emotes) {
+    if (!emotes || emotes.length === 0) return;
+
+    const fresh = [];
+    for (const emote of emotes) {
+      if (this.isCountedEmote(channel, emote.name)) continue;
+      if (!this.externalEmoteCache.has(channel)) this.externalEmoteCache.set(channel, new Map());
+      this.externalEmoteCache.get(channel).set(emote.name, emote.id);
+      fresh.push(emote);
+    }
+    if (fresh.length === 0) return;
+
+    // Те, что до сих пор вообще ни за что не считались смайликами, всё это время копились в
+    // ChatWordStats как обычные слова - их накопленное надо перенести (см. миграцию ниже).
+    // Остальные (например, уже прибранные тумбстоуном) переносить нечего.
+    const unseen = fresh.filter(emote => this.rememberEmote(channel, emote.name)).map(emote => emote.name);
+
+    this.persistExternalEmotes(channel, fresh)
+      .then(() => this.migrateWordStatsToEmoteIndex(channel, unseen))
+      .catch(err => console.error('[Emotes] learnExternalEmotes failed:', err));
+  }
+
+  // Строка реестра пишется ТОЛЬКО при вставке: если имя уже занято строкой другого источника
+  // (глобальный смайлик Twitch, набор канала), она не наша и трогать её нечем - картинка и
+  // происхождение у неё уже есть. Так же это делает запись идемпотентной при гонке двух
+  // сообщений с одним и тем же новым смайликом.
+  async persistExternalEmotes(channel, emotes) {
+    await this.ensureInitialized();
+    await this.whiteListCollection.bulkWrite(emotes.map(emote => ({
+      updateOne: {
+        filter: { channel, word: emote.name },
+        update: {
+          $setOnInsert: {
+            channel,
+            word: emote.name,
+            source: EXTERNAL_EMOTE_SOURCE,
+            // Единственный ключ к картинке: у сайта нет набора, в котором этот смайлик лежит.
+            emoteId: emote.id,
+            firstSeen: new Date(),
+          },
+        },
+        upsert: true,
+      },
+    })), { ordered: false });
+    console.log(`[Emotes] ${channel}: learnt ${emotes.length} foreign Twitch emote(s): ${emotes.map(e => e.name).join(', ')}`);
+  }
+
+  /**
+   * Переносит накопленное словом в индекс смайликов - для токена, который только что стал
+   * смайликом, а до этого копился в ChatWordStats.
+   *
+   * Перенос, а не удаление (purgeWordStatsForEmotes), потому что обе коллекции считают ОДНО И
+   * ТО ЖЕ: «в скольких сообщениях встретился токен», раз на сообщение. Число уже посчитано и
+   * верно - удалить его значит выбросить историю смайлика ровно в тот момент, когда мы наконец
+   * узнали, что это смайлик (у `otirahi` на #mistercop это 1079 сообщений). Дневные строки
+   * ложатся в `words` по своей дате: обе коллекции бьют день по полудню (dayBucket), так что
+   * даты совпадают без пересчёта. Строка-сентинел эпохи - в WordLifetimeStats.
+   *
+   * Никогда не бросает: перенос - уборка, а не часть учёта сообщения.
+   *
+   * @param {string[]} words - написания, которыми смайлик рисуется (ChatWordStats хранит
+   *   строчное, индекс смайликов - настоящее).
+   */
+  async migrateWordStatsToEmoteIndex(channel, words) {
+    if (!words || words.length === 0) return { moved: 0 };
+    try {
+      await this.ensureInitialized();
+      const canonicalByLowered = new Map(words.map(word => [String(word).toLowerCase(), word]));
+      const lowered = [...canonicalByLowered.keys()];
+      const rows = await this.chatWordStats.find({ channel, word: { $in: lowered } }).toArray();
+      if (rows.length === 0) return { moved: 0 };
+
+      const dailyOps = [];
+      const lifetimeOps = [];
+      let moved = 0;
+      for (const row of rows) {
+        const word = canonicalByLowered.get(row.word);
+        const count = Number(row.count) || 0;
+        if (!word || count <= 0) continue;
+        moved += count;
+        if (row.date instanceof Date && row.date.getTime() === LIFETIME_BUCKET.getTime()) {
+          lifetimeOps.push({
+            updateOne: {
+              filter: { channel, word },
+              update: { $inc: { count }, $max: { lastUsed: row.lastUsed instanceof Date ? row.lastUsed : new Date(0) } },
+              upsert: true,
+            },
+          });
+        } else {
+          dailyOps.push({
+            updateOne: { filter: { channel, word, date: row.date }, update: { $inc: { count } }, upsert: true },
+          });
+        }
+      }
+
+      if (dailyOps.length > 0) await this.wordsCollection.bulkWrite(dailyOps, { ordered: false });
+      if (lifetimeOps.length > 0) await this.wordLifetimeStats.bulkWrite(lifetimeOps, { ordered: false });
+      // Снос словарных строк - тем же кодом, что и всегда: он ещё и подметает буфер, в котором
+      // могло осесть несколько секунд счёта, иначе они вернулись бы обратно после удаления.
+      await this.purgeWordStatsForEmotes(channel, lowered);
+      if (moved > 0) {
+        console.log(`[Emotes] ${channel}: moved ${moved} message-count(s) of ${lifetimeOps.length} token(s) from the word index to the emote index`);
+      }
+      return { moved };
+    } catch (err) {
+      console.error(`[Emotes] migrateWordStatsToEmoteIndex failed for ${channel}:`, err);
+      return { moved: 0 };
+    }
+  }
+
   // Строчное написание -> написание из набора канала. Пересобирается целиком, а не правится по
   // одному слову: набор одного канала - несколько сотен строк, а два места, где он меняется
   // (загрузка и синхронизация), обязаны давать одинаковый индекс.
@@ -895,14 +1045,14 @@ class ChatStats {
     this.reindexEmoteSpellings(channel);
     // staleWords are intentionally NOT un-excluded from the word cloud - see rememberEmote().
     // Words that are NEW to the exclusion set were, until now, being counted into ChatWordStats
-    // as ordinary words - purge those rows so the new emote also disappears from the word cloud
-    // retroactively, not just going forward.
+    // as ordinary words - move those counts into the emote index, so the emote leaves the word
+    // cloud retroactively AND arrives in the emote cloud with the history it actually has.
     const newlyExcluded = [];
     wordSet.forEach(word => {
-      if (this.rememberEmote(channel, word)) newlyExcluded.push(String(word).toLowerCase());
+      if (this.rememberEmote(channel, word)) newlyExcluded.push(word);
     });
     if (newlyExcluded.length > 0) {
-      await this.purgeWordStatsForEmotes(channel, newlyExcluded);
+      await this.migrateWordStatsToEmoteIndex(channel, newlyExcluded);
     }
 
     return { synced: words.length, removed: staleWords.length };
@@ -910,6 +1060,21 @@ class ChatStats {
 
   async syncSevenTvEmoteSet(channel, setId, words) {
     return this.syncEmoteSource(channel, '7tv', words, { setId });
+  }
+
+  // The three browser-extension emote providers. Each is ONE source per provider even though it
+  // covers that provider's channel set AND its global one: both are fetched in a single call, so
+  // one source is what keeps "the source's rows are exactly this list" true.
+  async syncSevenTvGlobalEmotes(channel, words) {
+    return this.syncEmoteSource(channel, '7tv-global', words);
+  }
+
+  async syncBttvEmotes(channel, words) {
+    return this.syncEmoteSource(channel, 'bttv', words);
+  }
+
+  async syncFfzEmotes(channel, words) {
+    return this.syncEmoteSource(channel, 'ffz', words);
   }
 
   // Deletes the accumulated stats (words + WordLifetimeStats) of every emote the channel no
@@ -1033,11 +1198,16 @@ class ChatStats {
   // rather than merely consumed - the site's per-user word cloud tokenizes `messages` at READ
   // time (TwitchBot-Web/db/wordStatsRepo.js) and would otherwise re-introduce exactly the
   // pollution stripped here. The GIF's id and URL exist nowhere else once the line is written.
-  async addMessage(userId, userName, message, channel, gifsTag) {
+  async addMessage(userId, userName, message, channel, gifsTag, emotesTag) {
     await this.ensureInitialized();
 
     const timestamp = new Date();
     const gifs = parseGifTag(gifsTag);
+    // Every Twitch emote Twitch itself recognised in this line, id and all - including the ones
+    // no list of ours could ever hold (another broadcaster's sub/bits/follower emotes). Learnt
+    // BEFORE the counters below run, so this very message already counts them as emotes instead
+    // of first putting them in the word cloud and taking them out on the next sighting.
+    this.learnExternalEmotes(channel, parseEmotesTag(emotesTag, message));
     // Everything the stat counters below see, with the GIF titles blanked out. The document
     // itself keeps `message` verbatim - it is what the viewer actually sent, and the site
     // displays it.
@@ -1075,7 +1245,7 @@ class ChatStats {
     }
 
     // Each word counts at most once per message, even if repeated in it.
-    const allowedWords = [...candidateWords].filter(word => this.isInWhiteList(channel, word));
+    const allowedWords = [...candidateWords].filter(word => this.isCountedEmote(channel, word));
 
     if (allowedWords.length > 0) {
       const today = new Date();

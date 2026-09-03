@@ -12,7 +12,9 @@
 // accepted: worst case is one extra sync right after a restart. The manual !update7tv command
 // does NOT go through here and neither consumes nor defers the scheduled cap; it has its own
 // per-channel cooldown.
-const { syncChannelEmoteSet } = require('../sevenTv/SevenTvEmotes.js');
+const { syncChannelEmoteSet, syncGlobalEmoteSet } = require('../sevenTv/SevenTvEmotes.js');
+const { syncBttvEmotes } = require('../bttv/BttvEmotes.js');
+const { syncFfzEmotes } = require('../ffz/FfzEmotes.js');
 const { syncGlobalEmotes } = require('./globalEmotes.js');
 const { syncChannelEmotes } = require('./channelEmotes.js');
 const ChatStats = require('../db/chatStats.js');
@@ -31,13 +33,23 @@ function getState(login) {
   return channelState.get(login);
 }
 
-// The canonical sync chain (hoisted from index.js's startup loop). Twitch's global emotes
-// FIRST, then the broadcaster's own Twitch emotes, then the channel's own 7TV set LAST: the
-// whitelist's unique key is {channel, word}, so on a name collision the later sync owns the
-// row, and a 7TV set - the most deliberately curated of the three - is the most meaningful
-// attribution. The prune only runs when ALL THREE syncs succeeded (a failed fetch rejects
-// before it), so a transient API outage can never make it mistake still-tracked emotes for
-// orphans. Rejects on failure - callers decide whether that's fatal.
+// The canonical sync chain (hoisted from index.js's startup loop). Order is least-specific to
+// most: Twitch's globals, the broadcaster's own Twitch emotes, then the three browser-extension
+// providers - 7TV's global set, BTTV, FFZ - and the channel's OWN 7TV set last. The whitelist's
+// unique key is {channel, word}, so on a name collision the later sync owns the row, and the
+// channel's own curated set is the most meaningful attribution.
+//
+// Every provider here draws its emotes client-side, so to the bot they are ordinary words until
+// they are whitelisted - which is what the three extension syncs are for. Only Twitch's own
+// emotes can also arrive identified in the message itself, through the `emotes` tag, and those
+// are learnt per message instead (db/chatStats.js's learnExternalEmotes) because they belong to
+// channels nobody here can enumerate.
+//
+// The prune only runs when ALL the syncs succeeded (a failed fetch rejects before it), so a
+// transient API outage can never make it mistake still-tracked emotes for orphans. That is also
+// why a channel with no BTTV/FFZ account must read as an empty list rather than an error: those
+// modules turn a 404 into [], and anything else throws. Rejects on failure - callers decide
+// whether that's fatal.
 async function syncNow(channelLogin) {
   const state = getState(channelLogin);
   // Owned here (not in maybeSyncOnLiveTick) so the startup call marks itself in-flight too -
@@ -48,6 +60,9 @@ async function syncNow(channelLogin) {
     const channel = `#${channelLogin}`;
     await syncGlobalEmotes(channel);
     await syncChannelEmotes(channel);
+    await syncGlobalEmoteSet(channel);
+    await syncBttvEmotes(channel);
+    await syncFfzEmotes(channel);
     await syncChannelEmoteSet(channel);
     await ChatStats.pruneUntrackedEmoteStats(channel);
     const now = Date.now();

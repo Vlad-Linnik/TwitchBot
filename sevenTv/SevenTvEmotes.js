@@ -29,6 +29,24 @@ async function fetchEmoteSetWords(broadcasterId) {
   return { setId, words };
 }
 
+// 7TV's GLOBAL set - the same for every channel, and rendered for every viewer with the
+// extension regardless of what the broadcaster has set up. Kept as its own whitelist source
+// rather than folded into the channel's: they are two independent lists, and syncEmoteSource()
+// makes a source's rows exactly match the list it is handed, so one list per source is the only
+// shape that lets either fail alone. Measured on #mistercop, this set alone had put 6,664
+// messages' worth of `Clap`, `SteerR`, `TeaTime` and `AlienDance` into the word cloud.
+async function fetchGlobalEmoteWords() {
+  const { data } = await axios.get(`${API_BASE}/emote-sets/global`);
+  return (data?.emotes ?? []).map(emote => emote.name).filter(Boolean);
+}
+
+async function syncGlobalEmoteSet(channel) {
+  const words = await fetchGlobalEmoteWords();
+  await ChatStats.syncSevenTvGlobalEmotes(channel, words);
+  console.log(`[7TV] Synced ${words.length} global emotes for ${channel}`);
+  return { words };
+}
+
 // Resolves the channel's broadcaster ID and upserts its linked 7TV set's emotes into that
 // channel's whitelist, removing any previously-synced emotes no longer in the set.
 // Returns null if the channel has no 7TV account linked.
@@ -48,5 +66,7 @@ async function syncChannelEmoteSet(channel) {
 
 module.exports = {
   fetchEmoteSetWords,
+  fetchGlobalEmoteWords,
+  syncGlobalEmoteSet,
   syncChannelEmoteSet,
 };

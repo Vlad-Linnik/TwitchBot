@@ -178,6 +178,77 @@ function stripGifSpans(message, gifs) {
   return chars.map((ch, i) => (cut[i] ? ' ' : ch)).join('');
 }
 
+// ---------------------------------------------------------------------------------------
+// Twitch's `emotes` tag - the ONLY way to know a Twitch emote that is not the channel's own.
+//
+// A viewer subscribed to some other channel can type that channel's sub emotes anywhere on
+// Twitch, and the same holds for bits and follower emotes. None of those are in this channel's
+// whitelist (nothing fetches another broadcaster's set, and there is no endpoint that would
+// answer "which foreign emotes might show up here"), so until this existed they were counted as
+// ordinary WORDS: on #mistercop `otirahi` had accumulated 1079 messages, `floimxdx` 686 and
+// `totori8meh` 511, and they surfaced as words in the "Выше - ниже" game.
+//
+// Shape is the `gifs` tag's, one level deeper - `<id>:<start>-<end>,<start>-<end>/<id>:...`:
+//
+//   emotes=25:0-4,12-16/1902:6-10 :Kappa Keepo Kappa
+//
+// The tag carries the id and the positions but NOT the name; the name is the message text at
+// that span, which is why this needs the message as well as the tag.
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Parse the raw `emotes` tag into `{id, name, start, end}` rows, one per DISTINCT emote (the
+ * stat indexes count a token once per message, so the repeats carry no information).
+ *
+ * A span is accepted only when it covers a whole whitespace-delimited token of `message`.
+ * Twitch renders an emote only as such a token, so anything else means our idea of the
+ * positions disagrees with Twitch's - and the cost of trusting a shifted span is a garbage
+ * name written into the emote registry forever. Dropping it costs one uncounted emote.
+ *
+ * @param {string} [tag] - userState['emotes-raw'], the tag verbatim (tmi.js parses `emotes`
+ *   itself into an object and keeps the original string under this key).
+ * @param {string} [message] - the message the tag came with, VERBATIM: the positions index it.
+ * @returns {{id: string, name: string, start: number, end: number}[]}
+ */
+function parseEmotesTag(tag, message) {
+  if (!tag || typeof tag !== 'string') return [];
+
+  // Positions index CODE POINTS, not UTF-16 units - same as the `gifs` tag, and the reason an
+  // emoji earlier in the line would otherwise shift every span after it.
+  const chars = Array.from(String(message ?? ''));
+  if (chars.length === 0) return [];
+
+  const out = [];
+  const seen = new Set();
+
+  for (const entry of tag.split('/')) {
+    const colon = entry.indexOf(':');
+    if (colon <= 0) continue;
+    const id = entry.slice(0, colon);
+    if (!id) continue;
+
+    for (const range of entry.slice(colon + 1).split(',')) {
+      const dash = range.indexOf('-');
+      if (dash < 0) continue;
+      const start = Number(range.slice(0, dash));
+      const end = Number(range.slice(dash + 1));
+      if (!Number.isInteger(start) || !Number.isInteger(end)) continue;
+      if (start < 0 || end < start || end >= chars.length) continue;
+      // Whole-token check, both edges.
+      if (start > 0 && !/\s/.test(chars[start - 1])) continue;
+      if (end + 1 < chars.length && !/\s/.test(chars[end + 1])) continue;
+
+      const name = chars.slice(start, end + 1).join('');
+      if (!name || /\s/.test(name)) continue;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push({ id, name, start, end });
+    }
+  }
+
+  return out;
+}
+
 /**
  * Distinct, stat-worthy words in a message, lowercased.
  *
@@ -283,6 +354,7 @@ module.exports = {
   clean,
   parseGifTag,
   stripGifSpans,
+  parseEmotesTag,
   extractWords,
   extractMentions,
   isCommandMessage,

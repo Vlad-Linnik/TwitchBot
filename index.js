@@ -195,7 +195,7 @@ async function bootstrap() {
     try {
       // log msg
       if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase())) {
-        ChatStats.addMessage(userState["user-id"], userState["username"], message, channel, userState["gifs"])
+        ChatStats.addMessage(userState["user-id"], userState["username"], message, channel, userState["gifs"], userState["emotes-raw"])
           .catch(err => console.error('[ChatStats] addMessage error:', err));
         // counts toward the "standard messages between automated commands" gate
         customCommands.recordChatMessage(channel);
