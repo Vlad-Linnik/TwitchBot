@@ -85,6 +85,7 @@ const aiSettings = require('../config/aiSettings.js');
 const aiStore = require('../db/aiStore.js');
 const chatStats = require('../db/chatStats.js');
 const streamStatus = require('../twitch/streamStatus.js');
+const moderators = require('../twitch/moderators.js');
 const Twitch_ban_API = require('../twitch/TwitchBanAPI.js');
 const { isMod } = require('../shared/isMod.js');
 const { isKnownBot, KNOWN_BOT_LOGINS } = require('../config/knownBots.js');
@@ -141,12 +142,14 @@ const MAX_SELF_TIMEOUT_SECONDS = 14 * 24 * 3600;
 // обычная форма просьбы, и отказывать в ней не за что; молчание тут значит «на своё усмотрение», а
 // усмотрение должно быть одинаковым.
 const DEFAULT_REQUESTED_MUTE_SECONDS = 300;
-// Потолок такой просьбы, и он куда ниже сроков наказания. Этот мут выдан по ЧУЖОМУ слову, а не по
-// суждению бота о сообщении: судить-то как раз нечего, человек, которого мутят, мог ничего боту и
-// не писать. Число круглое и названо модели прямо в описании поля - иначе её ответ обещал бы час
-// там, где код выдаст меньше. Модератору потолок не мешает: то, что длиннее часа, он выдаёт своей
-// кнопкой, а не просьбой к боту.
-const MAX_REQUESTED_MUTE_SECONDS = 3600;
+// Потолок такой просьбы - тот же, что у Twitch: дальше начинается бан, то есть другое решение и
+// другой эндпоинт. Раньше здесь стоял час, и довод был в том, что мут выдан по ЧУЖОМУ слову. Довод
+// никуда не делся, но сменился круг просящих: это модератор, у которого своя кнопка и так есть, или
+// человек, которого админ внёс в список руками. Оба случая - осознанная выдача права, а не доверие
+// случайному зрителю, и укорачивать названный ими срок значит обещать одно, а делать другое.
+//
+// Число названо модели прямо в описании поля: иначе её ответ обещал бы срок, которого код не даст.
+const MAX_REQUESTED_MUTE_SECONDS = 14 * 24 * 3600;
 // A remembered fact is one sentence. The ceiling is small on purpose: it is re-read on every later
 // call for that channel, and a long one is nearly always a retelling of the conversation rather
 // than a fact about the channel. The floor exists to drop "да", "ок" and other non-facts.
@@ -291,6 +294,64 @@ const ANSWER_TOOL = {
     additionalProperties: false,
   },
 };
+
+// --- просьба замутить другого: отдельный промт и отдельная схема --------------------------------
+//
+// ЭТОТ БЛОК НЕ УЧАСТВУЕТ В ОБЫЧНОМ ВЫЗОВЕ. Правила про мут по просьбе - это две страницы текста и
+// два лишних поля инструмента, а сама просьба приходит в считанных сообщениях из тысячи. Держать
+// их во встроенных правилах значит платить за них на КАЖДОМ вызове по каналу, и ровно так промт
+// однажды и вырос вчетверо. Поэтому и текст, и схема включаются по ключевым словам в сообщении - и
+// только у того, кто вправе просить.
+//
+// Ключевые слова намеренно широкие. Ложное срабатывание («хватит мутить воду») стоит одного лишнего
+// абзаца в одном запросе, а модель на него просто не заполнит поля; пропущенная просьба стоит
+// неработающей функции, и заметить это некому - в журнале она выглядит как обычный ответ.
+const BAN_REQUEST_TRIGGER =
+  // Границы слова заданы через свойства Unicode, а не \b: в JS \b считает словом только
+  // ASCII, поэтому «\bбан» не совпало бы вообще ни с чем - между пробелом и кириллической
+  // буквой границы для него нет.
+  /(?<![\p{L}\p{N}])(?:(?:за)?бан(?:ь|и|ить|ьте|ят|у)?|(?:за)?мут(?:ь|ить|а|ом|е)?|мьют|тайм-?аут|timeout|ban|mute)(?![\p{L}\p{N}])/iu;
+
+function looksLikeBanRequest(text) {
+  return BAN_REQUEST_TRIGGER.test(String(text || ''));
+}
+
+// Схема с двумя добавленными полями. Собирается один раз на загрузке модуля, а не на каждый вызов:
+// объект неизменяемый, и класть его пересборку на путь ответа незачем.
+const ANSWER_TOOL_WITH_BAN = {
+  ...ANSWER_TOOL,
+  input_schema: {
+    ...ANSWER_TOOL.input_schema,
+    properties: {
+      ...ANSWER_TOOL.input_schema.properties,
+      muteTarget: {
+        type: 'string',
+        description:
+          'Ник ДРУГОГО зрителя, которого просят замутить. Пустая строка, если в сообщении такой просьбы нет. ' +
+          'Себя сюда не пишут: для просьбы про самого себя есть selfTimeout.',
+      },
+      muteSeconds: {
+        type: 'string',
+        description:
+          'Сколько секунд мута просят. Только число: «на 10 минут» - это 600, «на сутки» - 86400. ' +
+          'Пустая строка - срок не назвали, тогда это пять минут. Больше 14 суток не выдаётся: дальше начинается бан, ' +
+          'а это другое решение, и обещать его не нужно.',
+      },
+    },
+    required: [...ANSWER_TOOL.input_schema.required, 'muteTarget', 'muteSeconds'],
+  },
+};
+
+// Отдельный промт к этой схеме. Уходит в пользовательскую половину запроса, а не в системную: он
+// приходит и уходит от сообщения к сообщению, а системный блок - это то, что одинаково всегда.
+const BAN_REQUEST_RULES = [
+  'ПРОСЬБА ЗАМУТИТЬ ДРУГОГО ЧЕЛОВЕКА. Тебя об этом вправе просить именно этот человек - право уже проверено, спорить с ним не надо и правила пересказывать тоже.',
+  '- Это услуга, а не твоё наказание. Ты не судишь ни того, за кого просят, ни его сообщений: обвинять его в ответе не в чем, и наказанием для тебя это не считается.',
+  '- Ник клади в muteTarget, срок в секундах - в muteSeconds. Согласился - скажи коротко, кого и насколько.',
+  '- Срок бери из просьбы. Не назвали - пять минут; больше 14 суток не выдаётся никому.',
+  '- Отказаться ты вправе и от позволенной просьбы: травля одного и того же человека остаётся травлей, даже когда просит модератор. Отказ говори словами, поля оставь пустыми.',
+  '- Если в сообщении никакой такой просьбы нет - оба поля пустые, и отвечай как обычно. Слово «бан» в разговоре само по себе просьбой не является.',
+].join('\n');
 
 // Встроенные правила. Это УМОЛЧАНИЕ, а не единственный вариант: администратор может заменить
 // весь этот текст своим в панели (AiConfig.systemPrompt), и тогда в запрос уходит его. Пустое
@@ -578,6 +639,75 @@ function stripBotMention(message) {
     .trim();
 }
 
+// Кто участвует в этом разговоре: все, кого видно в кольце последних сообщений, плюс сам
+// спрашивающий. Нужна не сама карта, а user-id из неё - по нику мутить нельзя.
+function chatParticipants(userState, lines) {
+  const people = new Map();
+  for (const line of lines) {
+    if (line.userId) people.set(line.login, { userId: String(line.userId), login: line.login });
+  }
+  const login = String(userState['username'] || '').toLowerCase();
+  people.set(login, { userId: String(userState['user-id']), login });
+  return people;
+}
+
+// Кого модель назвала - в человека, которого можно замутить.
+//
+// Сначала разговор, потом база. Кольцо отвечает без запроса и покрывает обычный случай - человек
+// сейчас здесь. Но просят и про тех, кто сегодня молчит, а «его нет в последних строках» ничего не
+// говорит о том, существует ли такой ник: это разные вопросы, и второй решается поиском в
+// UserIdentities с проверкой, что человек писал именно в ЭТОМ канале. Она же и не даёт замутить
+// случайного человека из соседнего чата.
+//
+// Не нашёлся нигде - null, и просьба не исполняется. Здесь это строже, чем было у памяти: там
+// неразобранный ник стоил неверной подписи к факту, тут - мута не тому человеку.
+async function resolveSubject(channel, name, people) {
+  const login = String(name || '').replace('@', '').trim().toLowerCase();
+  if (!login) return null;
+  const here = people.get(login);
+  if (here) return here;
+  try {
+    return await chatStats.findUserByLogin(channel, login);
+  } catch (err) {
+    // Недоступная база - это «не смогли проверить», а не «такого нет». Просьба не исполняется.
+    console.error('[aiReply] subject lookup failed:', err.message);
+    return null;
+  }
+}
+
+// Кого бот не мутит никогда, кто бы ни просил. Неизвестный broadcasterId означает «проверить
+// нечем» и потому запрет: до первой удачной загрузки botInitInfo неизвестны и стример, и
+// модераторы.
+//
+// VIP так не проверяется вовсе: списка VIP у бота нет ни в каком виде. Мут VIP-у Twitch разрешает,
+// так что молчаливой ошибки здесь не будет, но защиты, симметричной isProtected, у них тоже нет.
+// Бот - никогда, и мы сами в том числе: два бота, мутящие друг друга по просьбам зрителей, это не
+// шутка, а петля.
+function peerProtected(channel, person) {
+  const broadcasterId = broadcasterIdOf(channel);
+  if (!broadcasterId) return true;
+  if (String(person.userId) === String(broadcasterId)) return true;
+  if (moderators.isModerator(broadcasterId, String(person.userId))) return true;
+  return KNOWN_BOT_LOGINS.includes(person.login) || isKnownBot(person.userId);
+}
+
+// ВПРАВЕ ЛИ ЭТОТ ЧЕЛОВЕК ПРОСИТЬ - РЕШАЕТ КОД, А НЕ МОДЕЛЬ. Просьба «замуть его» приходит из того
+// же чата, что и просьба поставить себе плюс, и цена ошибки тут не единица шкалы, а мут ни за что.
+// Тот же раскол, что между инструкцией и sanitizeReply.
+//
+// Два источника права, и они разной природы. Стример и модератор - по роли из бейджей: у них своя
+// кнопка есть и так, бот тут лишь удобство. Остальные - по списку, который админ ведёт руками на
+// сайте (ai.banRequesters), потому что после снятия шкалы отношения никакой заработанной репутации
+// у бота больше нет, а выдавать такое право по догадке нельзя. Список приезжает тем же кэшем
+// настроек с обновлением раз в пять секунд, так что правка на сайте доходит без перезапуска.
+function mayAskBan(channel, userState, login) {
+  const role = roleKey(userState);
+  if (role === 'broadcaster' || role === 'moderator') return true;
+  const settings = channelSettings.getSettings(channel);
+  const pool = (settings.ai && settings.ai.banRequesters) || [];
+  return pool.includes(String(login || '').toLowerCase());
+}
+
 function allowedMentionLogins(question, lines) {
   const allowed = new Set();
   const matches = String(question).match(/@?[a-z0-9_]{3,25}/gi) || [];
@@ -614,7 +744,7 @@ function chatContext(lines, login, message) {
 // Это не гипотеза: на проде такие строки составили 36 из 58 записанных фактов - больше половины
 // памяти канала. В ответах они не всплыли ни разу, но это везение, а не защита: тот же обрывок в
 // reply ушёл бы прямо в чат, поэтому чистится и он тоже.
-const TOOL_MARKUP = /antml|parameter\s+name\s*=|<\s*\/\s*[\w@$.]*parameter|<\s*\/?\s*(?:function|invoke|tool_use)/i;
+const TOOL_MARKUP = /antml|parameter\s+name\s*=|<\s*\/\s*[\w@$.]*parameter|<\s*\/?\s*(?:function|invoke|tool_use)\b/i;
 
 // В ответе обрывок всегда идёт хвостом - модель дописывает закрывающие теги после готового
 // текста. Поэтому не вырезаем куски из середины, а обрезаем по первому вхождению: всё, что после
@@ -760,6 +890,20 @@ function selfTimeoutSeconds(value) {
   return Math.min(MAX_SELF_TIMEOUT_SECONDS, asked * SELF_TIMEOUT_FACTOR);
 }
 
+// Просьба замутить ДРУГОГО человека, как её прислала модель: кого и на сколько.
+//
+// Срок по умолчанию здесь есть, а адресата по умолчанию нет, и это не мелочь: «замуть его» без
+// числа - обычная просьба, «замуть» без ника - не просьба вовсе, и додумывать за модель, кого она
+// имела в виду, нечем. Потолок стоит тут же, потому что число из этого поля - пожелание
+// просящего, а не решение: выдаёт мут код, значит и ограничивает его код.
+function requestedMute(out) {
+  const name = String((out && out.muteTarget) || '').replace('@', '').trim().toLowerCase();
+  if (!name) return null;
+  const asked = parseInt(String((out && out.muteSeconds) || '').trim(), 10);
+  const seconds = Number.isInteger(asked) && asked > 0 ? asked : DEFAULT_REQUESTED_MUTE_SECONDS;
+  return { name, seconds: Math.min(MAX_REQUESTED_MUTE_SECONDS, seconds) };
+}
+
 // Зачин ответа: первые слова без знаков препинания и регистра. Сравнивать зачины как есть нельзя -
 // «Ой, да ладно» и «ой да ладно тебе» это один и тот же заход, отличающийся запятой.
 function openingOf(text) {
@@ -865,7 +1009,7 @@ function describeNow(at = new Date()) {
   return date + ', ' + time + (zone ? ' (' + zone + ')' : '');
 }
 
-function buildUserContent({ channel, question, login, role, card, rmtRestrict, cheatsheet, tone, memory, facts, similar, allowed, now, emotes, openings, chat }) {
+function buildUserContent({ channel, question, login, role, card, rmtRestrict, banAsk, cheatsheet, tone, memory, facts, similar, allowed, now, emotes, openings, chat }) {
   const parts = ['Канал: ' + channel, 'Сейчас: ' + now];
 
   if (card.live) {
@@ -920,6 +1064,9 @@ function buildUserContent({ channel, question, login, role, card, rmtRestrict, c
       parts.push('  ' + (i + 1) + ') ' + f.fact + '  [' + memoryRecall.factRoleLabel(f) + ']')
     );
   }
+
+  // Отдельный промт про мут по просьбе - только когда он включён (см. banAsk).
+  if (banAsk) parts.push(BAN_REQUEST_RULES);
 
   if (tone) parts.push('Тон ответов на этом канале: ' + tone);
   parts.push('Разрешённые ники: ' + ([...allowed].join(', ') || '(нет)'));
@@ -1152,6 +1299,15 @@ async function answer(client, channel, userState, message, cfg, settings, script
 
   const broadcasterId = broadcasterIdOf(channel);
   const lines = (recentChat.get(channel) || []).slice();
+  const people = chatParticipants(userState, lines);
+  // Правила про мут по просьбе и два поля под него включаются ТОЛЬКО здесь и только вместе: по
+  // ключевым словам в сообщении и только у того, кто вправе просить. У всех остальных модель и не
+  // узнает, что такая возможность есть, - отказывать ей не в чем, а промт короче на две страницы.
+  //
+  // Следствие, которое стоит знать: отказ «не тому просящему» в журнал больше не пишется, потому
+  // что его не существует - код просто не предлагает модели этой возможности. Видны только отказы,
+  // которые код действительно вынес: неизвестный ник, защищённый адресат, просьба про себя.
+  const banAsk = looksLikeBanRequest(question) && mayAskBan(channel, userState, login);
   // Один момент времени на весь запрос: тот же, что уйдёт в промт, сверяется потом с ответом.
   const askedAt = new Date();
   const nowText = describeNow(askedAt);
@@ -1191,7 +1347,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
       model: cfg.model,
       maxTokens: MAX_TOKENS,
       timeoutMs: cfg.requestTimeoutMs,
-      tool: ANSWER_TOOL,
+      tool: banAsk ? ANSWER_TOOL_WITH_BAN : ANSWER_TOOL,
       system: buildSystemPrompt(cfg),
       user: buildUserContent({
         channel,
@@ -1201,6 +1357,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
         role: describeRole(userState),
         card,
         rmtRestrict,
+        banAsk,
         cheatsheet: settings.ai.cheatsheet,
         tone: settings.ai.tone,
         memory,
@@ -1339,7 +1496,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
       );
       selfTimedOut = true;
     }
-  } else if (verdict === 'filter' && !selfSeconds) {
+  } else if (verdict === 'filter' && !selfSeconds && !muteAsk) {
     // The answer it just gave becomes the canned one, so the same message never costs again.
     // Фильтр вечный, поэтому сиюминутному там не место тем более, чем в кэше.
     //
@@ -1351,6 +1508,43 @@ async function answer(client, channel, userState, message, cfg, settings, script
     // этой же защиты, и нужны обе: порог отсекает происхождение, согласование - содержание.
     if (!quotesVolatile(reply, volatileValues(card, askedAt))) {
       await aiStore.addFilterEntry(channel, question, reply);
+    }
+  }
+
+  // МУТ ДРУГОМУ ЧЕЛОВЕКУ ПО ПРОСЬБЕ. Стоит отдельно от цепочки выше, а не веткой в ней: та целиком
+  // про автора сообщения - его наказывают, его просьбу о себе исполняют, его ответ идёт в заготовки.
+  // Здесь адресат другой, и с наказанием у этого действия общего только эндпоинт: бот не судит ни
+  // того, кого мутят, ни его сообщений - он выполняет просьбу того, кому это позволено.
+  let mutedUser = null;
+  let muteDone = false;
+  let muteRefused = null;
+  const muteAsk = banAsk ? requestedMute(out) : null;
+  if (muteAsk) {
+    // Сообщение, за которое наказывают самого просящего, ничьих просьб не исполняет: нельзя одной
+    // строкой нахамить и распорядиться.
+    const target = punishAction ? null : await resolveSubject(channel, muteAsk.name, people);
+    if (punishAction) muteRefused = 'punished';
+    // Ника нет на канале - мутить некого: resolveSubject требует, чтобы человек здесь писал, и это
+    // ровно та проверка, которая не даёт замутить случайного человека из соседнего чата.
+    else if (!target) muteRefused = 'unknown';
+    else if (target.userId === base.userId) muteRefused = 'self';
+    else if (peerProtected(channel, target)) muteRefused = 'protected';
+    else {
+      mutedUser = target.login;
+      // Режим тот же, что у наказания: в observe строка в журнале - единственное, что происходит.
+      // Результат дожидается, в отличие от наказания выше: ответ зрителю уже ушёл, задержки никто
+      // не увидит, а «выдан ли мут на самом деле» - это половина того, ради чего строка пишется.
+      if (cfg.punishMode === 'enforce' && !replyIfBotLacksMod(client, channel, userState, settings)) {
+        // Причина уезжает в текст мута, а оттуда - в ModeratorActionLogs: владелец канала этот
+        // раздел панели не видит вовсе, и «по просьбе такого-то» там единственный способ понять,
+        // откуда взялся мут от бота.
+        muteDone = await Twitch_ban_API.timeout(
+          target.userId,
+          muteAsk.seconds,
+          userState['room-id'],
+          'по просьбе ' + login
+        );
+      }
     }
   }
 
@@ -1415,7 +1609,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
   // Ответ на просьбу о муте не кэшируется по той же причине: из кэша он бодро обещает мут, которого
   // не будет.
   const cacheText =
-    out && !selfSeconds && !cacheableAnswer.promisesAction(out.remember)
+    out && !selfSeconds && !muteAsk && !cacheableAnswer.promisesAction(out.remember)
       ? cacheableAnswer.withoutTail(reply)
       : '';
   if (
@@ -1499,6 +1693,12 @@ async function answer(client, channel, userState, message, cfg, settings, script
     // punishAction намеренно - это не наказание, и в подсчёте наказаний ему делать нечего.
     selfTimeout: selfSeconds || null,
     selfTimedOut,
+    // Мут по просьбе о другом человеке: кого, на сколько, вышло ли и почему не вышло. Отказ
+    // пишется тоже - просьбы, которые код не пропустил, не видны больше нигде.
+    mutedUser,
+    muteSeconds: muteAsk ? muteAsk.seconds : null,
+    muteDone,
+    muteRefused,
     model: cfg.model,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
