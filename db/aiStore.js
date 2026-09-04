@@ -1,5 +1,6 @@
 // Bot-side Mongo access for the AI mention replies: the two lookaside tables checked before any
-// API call, the per-call journal, the permanent ignore list, and the channel memory.
+// API call, the per-call journal, and the channel memory (one store: facts about the channel
+// and about its viewers live in the same list).
 //
 // AiFilter - ПО КАНАЛАМ, а не общий на всех, как было раньше. Заготовку в него пишет сама модель
 // (вердикт filter), и пока таблица была общей, придуманный ею ответ начинал выдаваться во всех
@@ -9,13 +10,12 @@
 // девять вызовов на канал. Утечка чужого ответа в чужой чат стоит дороже.
 //
 // This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog /
-// AiChannelMemory / AiUserMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js)
+// AiChannelMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js)
 // but the bot is what writes them at runtime. Channel keys carry the leading '#', the same convention as every
 // other chat-stat collection in this database.
 const { connect } = require('./db.js');
 const { aiTextKey } = require('../shared/aiTextKey.js');
 const { factPriority, rankFacts } = require('../shared/memoryRecall.js');
-const rapport = require('../shared/rapport.js');
 
 let cols = null;
 
@@ -27,8 +27,6 @@ async function ensureInitialized() {
     cache: db.collection('AiAnswerCache'),
     log: db.collection('AiReplyLog'),
     memory: db.collection('AiChannelMemory'),
-    userMemory: db.collection('AiUserMemory'),
-    rapport: db.collection('AiUserRapport'),
     config: db.collection('AiConfig'),
     sessions: db.collection('StreamSessions'),
     samples: db.collection('StreamViewerSamples'),
@@ -48,11 +46,6 @@ async function ensureInitialized() {
     cols.log.createIndex({ createdAt: -1 }),
     cols.memory.createIndex({ channel: 1, key: 1 }, { unique: true }),
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
-    cols.userMemory.createIndex({ channel: 1, userId: 1, key: 1 }, { unique: true }),
-    cols.userMemory.createIndex({ channel: 1, userId: 1, createdAt: 1 }),
-    cols.rapport.createIndex({ channel: 1, userId: 1 }, { unique: true }),
-    // Под список в панели: он сортируется по счёту, потому что интересны края шкалы, а не середина.
-    cols.rapport.createIndex({ channel: 1, score: 1 }),
   ]);
   return cols;
 }
@@ -214,26 +207,6 @@ async function fixCachedAnswer(channel, staleAnswer, replacement) {
 
 // --- кто на дне шкалы ------------------------------------------------------
 
-// Все, к кому отношение на дне, разом - ключами «канал|userId». games/aiReply.js держит их в
-// памяти, потому что решение «каким путём идёт это сообщение» синхронное, а обращение к базе на
-// каждое упоминание не купило бы ничего. Список короткий по своей природе: на дно надо упасть.
-//
-// Индекса под этот запрос нет намеренно. Существующий {channel: 1, score: 1} его не обслуживает -
-// канал тут не задан, а без ведущего поля составной индекс не работает, - но строка в этой таблице
-// заводится только на том, кто дожил до платного вызова, так что их десятки, а читаем мы раз в
-// минуту на процесс. Свой индекс по score оплачивался бы на каждом сдвиге отношения, то есть на
-// каждом ответе, ради экономии на просмотре трёх десятков строк.
-//
-// Порог передаётся снаружи, а не зашит здесь: он живёт в shared/rapport.js вместе с остальными
-// числами шкалы, и второй его копии тут быть не должно.
-async function listHostileKeys(floor) {
-  const c = await ensureInitialized();
-  const rows = await c.rapport
-    .find({ score: { $lte: rapport.clampScore(floor) } }, { projection: { channel: 1, userId: 1 } })
-    .toArray();
-  return rows.map((r) => r.channel + '|' + r.userId);
-}
-
 // --- channel memory --------------------------------------------------------
 
 // What the bot has learnt about a channel and keeps re-reading. Deliberately a collection of short
@@ -242,7 +215,7 @@ async function listHostileKeys(floor) {
 // admin-written cheat sheet in ChannelConfig stays what it was - this sits next to it.
 //
 // EVERY fact here is sent on EVERY billed call for that channel, so the count is a cost decision,
-// not just a tidiness one - which is why the ceiling is a setting (channelMemoryMax) and why the
+// not just a tidiness one - which is why the ceiling is a setting (memoryMax) and why the
 // rotation below is unconditional.
 
 // Oldest first: that is the order they are numbered in the prompt, and a stable numbering is what
@@ -360,7 +333,7 @@ async function forgetFact(channel, key) {
 // нику, и показать устаревший хуже, чем не показать никакого.
 //
 // ПИШЕТСЯ ВСЕГДА В СВОЙ КАНАЛ, ЧИТАТЬСЯ МОЖЕТ ПО НЕСКОЛЬКИМ. Канал в ключе остаётся, даже когда
-// каналы делят память (см. listUserMemory): автор, роль и исходное сообщение - свидетельство
+// про человека: автор, роль и исходное сообщение - свидетельство
 // местное, страница курирования в панели тоже на канал, а один и тот же факт, сказанный в двух
 // чатах, - это два независимых свидетельства, а не одно. Дубль строки дешевле склейки, у которой
 // не было бы ни одного автора.
@@ -373,132 +346,6 @@ async function forgetFact(channel, key) {
 // строки почти всегда про то же, что и говорящий, а тут слово стримера про зрителя и слово
 // случайного зрителя про него же лежат рядом.
 
-// Факты про перечисленных людей, старые сначала - тем же порядком они нумеруются в промте.
-//
-// ЧИТАЕТСЯ НЕ ОДИН КАНАЛ, А ПУЛ. `channels` - это либо строка, либо список каналов, чья память о
-// зрителях объединена (games/aiReply.js:memoryPool). Факт про человека - утверждение про человека,
-// а не про канал, и «играет на гитаре» одинаково верно везде; факт про канал так не переносится,
-// поэтому пул есть только здесь, а listMemory по-прежнему знает один канал.
-//
-// Потолок применяется НА ЧЕЛОВЕКА И НА ВЕСЬ ПУЛ СРАЗУ, а не на человека в каждом канале. Иначе он
-// перестал бы означать то, ради чего заведён: userMemoryMax - это то, сколько строк про человека
-// уходит в оплачиваемый запрос, и при чтении по N каналам их уехало бы до N×max. Настройка здесь
-// одна именно потому, что читаются строки одного-двух названных людей; связь «потолок хранилища =
-// потолок расхода» держится только пока обрезка сквозная.
-//
-// Отбор внутри потолка - по словам вопроса (тот же rankFacts, что и у памяти канала), и он нужен
-// ровно с появлением пула: пока канал был один, строк про человека было заведомо меньше потолка и
-// выбирать было не из чего. Без вопроса (или когда строк и так меньше потолка) порядок остаётся
-// прежним - по последнему обращению.
-async function listUserMemory(channels, userIds, perUser, question) {
-  const c = await ensureInitialized();
-  const ids = (userIds || []).map(String).filter(Boolean);
-  const pool = (Array.isArray(channels) ? channels : [channels]).filter(Boolean);
-  if (!ids.length || !pool.length) return [];
-  const rows = await c.userMemory.find({ channel: { $in: pool }, userId: { $in: ids } }).toArray();
-
-  // Обрезка на чтении - страховка и на случай, когда потолок в настройках только что понизили:
-  // ротация на записи об этом ещё не знает. Строки, написанные админом, уходят в запрос всегда и
-  // не вытесняются - то же правило, что и в памяти канала, и по той же причине (потолок, который
-  // считает, но не вытесняет, молча удаляет чужие строки в момент записи).
-  const kept = [];
-  const byUser = new Map();
-  for (const row of rows) {
-    if (row.source !== 'ai') {
-      kept.push(row);
-      continue;
-    }
-    if (!byUser.has(row.userId)) byUser.set(row.userId, []);
-    byUser.get(row.userId).push(row);
-  }
-  for (const list of byUser.values()) {
-    // По возрастанию последнего обращения: rankFacts при равном совпадении предпочитает то, что
-    // стоит в списке позже, а «позже» тут должно означать «нужнее».
-    list.sort((a, b) => (a.lastUsedAt || a.createdAt || 0).valueOf() - (b.lastUsedAt || b.createdAt || 0).valueOf());
-    for (const row of rankFacts(question, list, Math.max(perUser || 0, 0))) kept.push(row);
-  }
-  return kept.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-}
-
-// Returns true when the fact was new. subject = { userId, login } - про кого факт; meta - с чьих
-// слов он записан. Это разные люди в общем случае, и путать их нельзя ни в одном из трёх мест,
-// где строка потом читается.
-async function rememberUserFact(channel, subject, fact, meta, max) {
-  const c = await ensureInitialized();
-  const key = aiTextKey(fact);
-  const userId = String(subject && subject.userId ? subject.userId : '');
-  if (!key || !userId) return false;
-  // Потолок в ноль означает «не запоминать», и отказать надо здесь, до записи: иначе строка
-  // заводится, тут же вычищается ротацией, а в журнал уходит «запомнил» про факт, которого в
-  // памяти никогда не было.
-  if (!max || max < 1) return false;
-
-  const res = await c.userMemory.updateOne(
-    { channel, userId, key },
-    {
-      // Логин обновляется и у уже записанной строки: человек мог смениться ником с тех пор, как
-      // факт про него записали, а узнают его в админке именно по нику.
-      $set: { login: String(subject.login || '').toLowerCase() },
-      $setOnInsert: {
-        channel,
-        userId,
-        key,
-        fact: String(fact),
-        source: 'ai',
-        authorLogin: meta.authorLogin || null,
-        authorUserId: meta.authorUserId || null,
-        authorRole: meta.authorRole || 'viewer',
-        sourceMessage: meta.sourceMessage || null,
-        // То же, что и у памяти канала: поисковые слова к факту, см. rememberFact выше.
-        keywords: Array.isArray(meta.keywords) ? meta.keywords : [],
-        createdAt: new Date(),
-        lastUsedAt: new Date(),
-      },
-    },
-    { upsert: true }
-  );
-  const added = Boolean(res.upsertedCount);
-
-  if (added) {
-    const total = await c.userMemory.countDocuments({ channel, userId, source: 'ai' });
-    if (total > max) {
-      const rows = await c.userMemory
-        .find({ channel, userId, source: 'ai' }, { projection: { _id: 1, authorRole: 1, source: 1, lastUsedAt: 1, createdAt: 1 } })
-        .toArray();
-      rows.sort((a, b) => {
-        const pa = factPriority(a);
-        const pb = factPriority(b);
-        if (pa !== pb) return pa - pb;
-        const ta = (a.lastUsedAt || a.createdAt || 0).valueOf();
-        const tb = (b.lastUsedAt || b.createdAt || 0).valueOf();
-        return ta - tb;
-      });
-      const stale = rows.slice(0, total - max);
-      if (stale.length) await c.userMemory.deleteMany({ _id: { $in: stale.map((d) => d._id) } });
-    }
-  }
-  return added;
-}
-
-// По _id, а не по ключу: ключ уникален внутри одного человека, и один и тот же текст про двоих -
-// это две законные строки. Как и у памяти канала, вызывается после отправки ответа и не роняет
-// разбор ответа модели.
-async function touchUserFacts(ids) {
-  if (!ids || !ids.length) return;
-  try {
-    const c = await ensureInitialized();
-    await c.userMemory.updateMany({ _id: { $in: ids } }, { $set: { lastUsedAt: new Date() } });
-  } catch (err) {
-    console.error('[aiStore] touchUserFacts failed:', err.message);
-  }
-}
-
-async function forgetUserFact(channel, userId, key) {
-  const c = await ensureInitialized();
-  const res = await c.userMemory.deleteOne({ channel, userId: String(userId), key: String(key) });
-  return Boolean(res.deletedCount);
-}
-
 // Кладёт в AiConfig текст встроенных правил, чтобы панель могла его показать и вернуть.
 //
 // ЕДИНСТВЕННОЕ ПОЛЕ, КОТОРОЕ БОТ ПИШЕТ В ЭТОТ ДОКУМЕНТ - остальное туда пишет сайт. Так сделано
@@ -509,112 +356,6 @@ async function forgetUserFact(channel, userId, key) {
 //
 // Сайт это поле только читает и никогда не сохраняет обратно из формы.
 // --- отношение к зрителю ---------------------------------------------------
-
-// Одно число на пару {канал, человек}: −10…+10. Что оно значит и вся арифметика вокруг него - в
-// shared/rapport.js, здесь только чтение и запись.
-//
-// КЛЮЧ ТОТ ЖЕ, ЧТО У ПАМЯТИ О ЗРИТЕЛЯХ, И ПО ТЕМ ЖЕ ПРИЧИНАМ: ники меняются, id нет, а строка живёт
-// долго. Логин лежит рядом и переписывается при каждой записи - в панели человек узнаётся по нику.
-//
-// ПУЛ ai.memoryShare РАБОТАЕТ ЗДЕСЬ ИНАЧЕ, ЧЕМ У ПАМЯТИ. Память о зрителях читается по пулу на
-// КАЖДОМ вызове: факт про человека верен в любом чате. Отношение так не переносится - это состояние
-// отношений в конкретном чате, а не свойство человека, и постоянное чтение по пулу означало бы, что
-// мут в одном канале удлиняет муты во всех остальных, пока идёт разговор. Поэтому пул участвует
-// РОВНО ОДИН РАЗ: при первом контакте строка засевается минимумом по пулу (rapport.seedScore), и с
-// этого момента живёт своей жизнью. Репутация приезжает с человеком один раз - перейти в соседний
-// чат, чтобы обнулить её, нельзя; а восстановить отношения на новом канале можно, и это правильно.
-//
-// Ротации и TTL нет намеренно: строка заводится только на том, кто дожил до платного вызова, а их
-// число уже ограничено дневным лимитом. Чистить тут нечего, и удаление строки означало бы прощение,
-// которое никто не решал выдать.
-async function getRapport(pool, channel, userId, login) {
-  const c = await ensureInitialized();
-  const id = String(userId);
-  const own = await c.rapport.findOne({ channel, userId: id });
-  if (own) {
-    return {
-      score: rapport.clampScore(own.score),
-      friend: Boolean(own.friend),
-      // Сказано ли уже человеку, что он стал другом. Переход случается ПОСЛЕ ответа, в котором он
-      // заработан, поэтому объявить его можно только в следующем разговоре, а без этой отметки -
-      // в каждом следующем.
-      friendAnnounced: Boolean(own.friendAnnounced),
-      source: own.source || 'ai',
-      seededFrom: own.seededFrom || null,
-      exists: true,
-    };
-  }
-
-  const others = (Array.isArray(pool) ? pool : [pool]).filter((ch) => ch && ch !== channel);
-  const foreign = others.length
-    ? await c.rapport
-        .find({ channel: { $in: others }, userId: id }, { projection: { score: 1, channel: 1 } })
-        .toArray()
-    : [];
-  const score = rapport.seedScore(foreign.map((r) => r.score));
-  // Откуда приехал счёт - видно в панели: без этого админ видит у новичка −6 и не может узнать,
-  // откуда они взялись. Пишется канал самой суровой строки, то есть той, которая и решила.
-  const from = foreign.length
-    ? foreign.reduce((a, b) => (rapport.clampScore(b.score) < rapport.clampScore(a.score) ? b : a)).channel
-    : null;
-  return {
-    score,
-    friend: false,
-    friendAnnounced: false,
-    source: 'ai',
-    seededFrom: score === rapport.START ? null : from,
-    exists: false,
-  };
-}
-
-// Пишется после того, как ответ уже ушёл в чат, поэтому падение здесь не должно ронять разбор
-// ответа модели: потерянный сдвиг отношения - это одна недосчитанная единица, а не потеря ответа.
-//
-// `source` переводится в 'ai' только когда счёт ДЕЙСТВИТЕЛЬНО сдвинулся. Иначе выставленное админом
-// значение переставало бы быть выставленным админом на первом же вызове, в котором модель ничего не
-// предложила, - то есть пометка исчезала бы сама по себе, ничего не изменив.
-async function setRapport(channel, userId, login, patch) {
-  try {
-    const c = await ensureInitialized();
-    const id = String(userId);
-    const set = {
-      login: String(login || ''),
-      score: rapport.clampScore(patch.score),
-      friend: Boolean(patch.friend),
-      friendAnnounced: Boolean(patch.friendAnnounced),
-      updatedAt: new Date(),
-    };
-    if (patch.changed) set.source = 'ai';
-    // Прощение считается отдельно от счёта, потому что отвечает на другой вопрос. Счёт говорит,
-    // как бот относится к человеку СЕЙЧАС, а эти два поля - сколько раз он уже начинал с ним
-    // сначала. Частоту прощения код не ограничивает (решает модель), и единственное, что делает
-    // её решение осмысленным, - это счётчик, который уезжает обратно в промт.
-    const inc = {};
-    if (patch.pardonedBy) {
-      set.pardonedAt = new Date();
-      set.pardonedBy = String(patch.pardonedBy);
-      inc.pardonCount = 1;
-    }
-    await c.rapport.updateOne(
-      { channel, userId: id },
-      {
-        $set: set,
-        ...(inc.pardonCount ? { $inc: inc } : {}),
-        $setOnInsert: {
-          channel,
-          userId: id,
-          // Откуда взялся стартовый счёт, если он не ноль. Только при вставке: канал-источник -
-          // это факт о рождении строки, и переписывать его позже нечем и незачем.
-          seededFrom: patch.seededFrom || null,
-          createdAt: new Date(),
-        },
-      },
-      { upsert: true }
-    );
-  } catch (err) {
-    console.error('[aiStore] setRapport failed:', err.message);
-  }
-}
 
 async function publishBuiltinPrompt(text) {
   try {
@@ -715,17 +456,10 @@ module.exports = {
   fixCachedAnswer,
   recentAnswers,
   publishBuiltinPrompt,
-  listHostileKeys,
   listMemory,
   rememberFact,
   touchFacts,
   forgetFact,
-  listUserMemory,
-  rememberUserFact,
-  touchUserFacts,
-  forgetUserFact,
-  getRapport,
-  setRapport,
   writeLog,
   recentExchanges,
   recentReplies,

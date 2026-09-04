@@ -5,7 +5,7 @@
 //
 // The per-channel half of this feature (enabled / tone / cheatsheet) is NOT here - it rides along
 // in ChannelConfig and is read through channelSettings.getSettings(channel).ai, and the memory the
-// bot writes for itself is rows in AiChannelMemory / AiUserMemory rather than a setting at all.
+// bot writes for itself is rows in AiChannelMemory rather than a setting at all.
 const { connect } = require('../db/db.js');
 
 // Hand-kept in sync with TwitchBot-Web/db/aiConfigRepo.js's DEFAULT_AI_CONFIG. These values are
@@ -21,15 +21,12 @@ const DEFAULT_AI_CONFIG = {
   requestTimeoutMs: 8000,
   memoryPairs: 5,
   memoryTtlDays: 30,
-  channelMemoryEnabled: true,
-  channelMemoryMax: 200,
-  channelMemoryRecall: 10,
-  userMemoryEnabled: true,
-  userMemoryMax: 10,
-  // Отношение к зрителю (−10…+10, shared/rapport.js). Умолчание ВЫКЛЮЧЕНО, в отличие от обеих
-  // памятей: те ничего не наказывают, а это меняет и то, кого мутят, и на сколько.
-  rapportEnabled: false,
-  rapportMaxMultiplier: 5,
+  // ПАМЯТЬ ОДНА - факты о канале и о его зрителях лежат в одном списке. Чисел два, потому что это
+  // разные величины: memoryMax ограничивает, сколько канал ПОМНИТ, memoryRecall - сколько строк
+  // уходит в оплачиваемый запрос, а это единственное из двух, что стоит денег.
+  memoryEnabled: true,
+  memoryMax: 200,
+  memoryRecall: 10,
   persona: '',
   // Правила целиком, если их переписали в панели. Пусто - работают встроенные из
   // games/aiReply.js: настройка, которую не заполняли, не может означать «без правил».
