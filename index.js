@@ -195,7 +195,10 @@ async function bootstrap() {
     try {
       // log msg
       if (!["moobot", "mistercopus_bot"].includes((userState["username"]).toLocaleLowerCase())) {
-        ChatStats.addMessage(userState["user-id"], userState["username"], message, channel, userState["gifs"], userState["emotes-raw"])
+        // The last two are Twitch's shared-chat pair: a line that reached this room from a
+        // channel we are merged with is otherwise indistinguishable from one sent here. See
+        // db/chatStats.js's foreignSourceRoom().
+        ChatStats.addMessage(userState["user-id"], userState["username"], message, channel, userState["gifs"], userState["emotes-raw"], userState["source-room-id"], userState["room-id"])
           .catch(err => console.error('[ChatStats] addMessage error:', err));
         // counts toward the "standard messages between automated commands" gate
         customCommands.recordChatMessage(channel);

@@ -12,6 +12,24 @@ const MAX_TIMEOUT_MS = 1_209_600_000; // 1,209,600s = 2 weeks, Twitch's longest 
 // convention as the other shared-schema constants documented in ../CLAUDE.md).
 const REACTION_SPEED_MAX_TTA_MS = 120000; // 2 minutes
 
+// Twitch shared chat ("Stream Together"): two or more channels merge their chats, and every
+// participant's room receives every participant's messages. IRC marks each line with
+// `source-room-id` - the room it ORIGINATED in - alongside the usual `room-id` of the room
+// delivering it. Both tags are present on EVERY line while a session is live, our own included,
+// where the two are equal; outside a session neither is sent at all. So the mismatch is the whole
+// signal, and it is the only one there is: a partner channel's line is otherwise an ordinary
+// PRIVMSG in our room, from a user who may never have visited this channel.
+//
+// Returns the foreign room id, or null for anything sent here - which keeps the field off the
+// overwhelming majority of documents and makes its presence, not its value, the question a reader
+// asks. Twitch sends ids as strings; they are compared as such rather than coerced, since one
+// side being absent must never read as a match.
+function foreignSourceRoom(sourceRoomTag, roomTag) {
+  if (!sourceRoomTag || typeof sourceRoomTag !== 'string') return null;
+  if (!roomTag || sourceRoomTag === String(roomTag)) return null;
+  return sourceRoomTag;
+}
+
 // Maps a timeout's duration onto the 1-9 severity band. Log-scaled because timeouts span
 // six orders of magnitude (1s..2 weeks) - a linear scale would put almost every real-world
 // timeout near 1.
@@ -1198,11 +1216,14 @@ class ChatStats {
   // rather than merely consumed - the site's per-user word cloud tokenizes `messages` at READ
   // time (TwitchBot-Web/db/wordStatsRepo.js) and would otherwise re-introduce exactly the
   // pollution stripped here. The GIF's id and URL exist nowhere else once the line is written.
-  async addMessage(userId, userName, message, channel, gifsTag, emotesTag) {
+  //
+  // `sourceRoomTag`/`roomTag` are Twitch's shared-chat pair - see foreignSourceRoom().
+  async addMessage(userId, userName, message, channel, gifsTag, emotesTag, sourceRoomTag, roomTag) {
     await this.ensureInitialized();
 
     const timestamp = new Date();
     const gifs = parseGifTag(gifsTag);
+    const sourceRoomId = foreignSourceRoom(sourceRoomTag, roomTag);
     // Every Twitch emote Twitch itself recognised in this line, id and all - including the ones
     // no list of ours could ever hold (another broadcaster's sub/bits/follower emotes). Learnt
     // BEFORE the counters below run, so this very message already counts them as emotes instead
@@ -1220,7 +1241,13 @@ class ChatStats {
       channel,
       timestamp,
       // Absent on the overwhelming majority of messages; only set when Twitch says so.
-      ...(gifs.length > 0 ? { gifs } : {})
+      ...(gifs.length > 0 ? { gifs } : {}),
+      // The partner channel a shared-chat line came from. Absent on everything else, which
+      // includes every row written before this shipped - so its absence is not proof the line
+      // was sent here. Stored as the numeric room id, never a login: the id is what Twitch
+      // sends, and it survives the partner renaming their channel. The site resolves it to a
+      // name through the profile cache it already uses for moderator ids.
+      ...(sourceRoomId ? { sourceRoomId } : {})
     }).catch(err => console.error('[DB] messagesCollection insert error:', err));
 
     this.userLifetimeStats.updateOne(
