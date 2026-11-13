@@ -25,8 +25,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
     settimer: { enabled: true, signature: "!settimer" },
     setpin: { enabled: true, signature: "!setpin" },
     setannounce: { enabled: true, signature: "!setannounce" },
-    addcounter: { enabled: true, signature: "!addcounter" },
-    delcounter: { enabled: true, signature: "!delcounter" },
+    addvar: { enabled: true, signature: "!addvar" },
+    delvar: { enabled: true, signature: "!delvar" },
+    vars: { enabled: true, signature: "!vars" },
     exception: { enabled: true, signature: "!addexception", remSignature: "!remexception" },
     update7tv: { enabled: true, cooldownMs: 30000, signature: "!update7tv" },
     randomclip: { enabled: true, cooldownMs: 30000, signature: "!randomclip" },
@@ -39,7 +40,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
     directmsg: { enabled: true, cooldownMs: 15000 },
     insult: { enabled: true, cumulativeDelayMs: 150000 },
     customCommandTimer: { minMessagesBetween: 10 },
-    counterUpdate: { cooldownMs: 10000 },
+    varUpdate: { cooldownMs: 10000 },
   },
   // "Бюро амнистии" - TwitchBot-Web's /unban-bureau review page and the advisory chat vote a
   // moderator can start from it (twitch/unbanRequestScheduler.js, games/unbanVote.js).

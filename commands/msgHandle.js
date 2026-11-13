@@ -17,7 +17,7 @@ const { isTimerReady } = require("../shared/timer.js");
 const ChatStats = require('../db/chatStats.js');
 const botInitInfo = require("../botInitInfo.js");
 const {muteDuelAccept, muteDuel, timeChanger} = require("../games/muteDuel.js");
-const {customCommands, counter} = require("./CustomCommands.js");
+const {customCommands, variables} = require("./CustomCommands.js");
 const Twitch_ban_API = require("../twitch/TwitchBanAPI.js");
 const { longBan, cancelLongBan, listLongBans } = require("./longBan.js");
 const Normalization = require("../shared/Normalization.js");
@@ -351,12 +351,12 @@ async function execCommands(client, channel, userState, message) {
     customCommands.setCommandPin,
     customCommands.setCommandAnnounce,
     customCommands.exex_custom_command,
-    counter.addCounter,
-    counter.deleteCounter,
-    counter.updateCounter,
-    counter.getCountersList,
-    counter.addCustomCommandException,
-    counter.removeCustomCommandException
+    variables.addVariable,
+    variables.deleteVariable,
+    variables.updateVariable,
+    variables.listVariables,
+    variables.addCustomCommandException,
+    variables.removeCustomCommandException
 
   ]
   for (const cmd of asyncCommandsCheck) {

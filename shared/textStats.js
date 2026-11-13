@@ -79,7 +79,7 @@ function clean(message) {
 }
 
 /**
- * True for command invocations ("!countmsg vlad", "#counter"), which msgHandle.js routes on
+ * True for command invocations ("!countmsg vlad", "#variable"), which msgHandle.js routes on
  * the same two prefixes. These are logged to `messages` like any other line, but they are not
  * conversation: without this guard a command's arguments become "words" ("!countmsg vlad" would
  * put "vlad" in the word cloud) and its targets become "mentions" ("!ban @someone" is a

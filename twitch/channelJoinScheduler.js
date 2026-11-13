@@ -11,7 +11,7 @@
 // channel already known at boot: moderator cache, EventSub, activity tracking, an initial emote
 // sync, and - the part a channel known since boot never needs, because those modules already
 // seeded it at require time - registering the channel with every module that keeps its own
-// per-channel Map/object (commands/CustomCommands.js's Counter and CustomCommands, and the
+// per-channel Map/object (commands/CustomCommands.js's Variables and CustomCommands, and the
 // games/ modules with a per-channel cooldown). Skipping that last part is what would make this
 // dangerous instead of just slow: e.g. CustomCommands.exex_custom_command() iterates
 // this.CommandsKeysList[channel], which throws on a channel that was never registered.
@@ -21,7 +21,7 @@ const moderators = require('./moderators.js');
 const eventSub = require('./events.js');
 const ActivityTracker = require('./ActivitiTracker.js');
 const emoteSyncScheduler = require('./emoteSyncScheduler.js');
-const { counter, customCommands } = require('../commands/CustomCommands.js');
+const { variables, customCommands } = require('../commands/CustomCommands.js');
 const isInsult = require('../games/isInsult.js');
 const muteDuel = require('../games/muteDuel.js');
 const questionToThisBot = require('../games/questionToThisBot.js');
@@ -36,7 +36,7 @@ async function joinChannel(client, login, channelId) {
 
   // Same per-channel state every other module keeping one needs seeded before any message from
   // this channel can be handled safely - mirrors index.js's start() loop.
-  await counter.addChannel(channel);
+  await variables.addChannel(channel);
   await customCommands.addChannel(channel);
   isInsult.addChannel(channel);
   muteDuel.addChannel(channel);

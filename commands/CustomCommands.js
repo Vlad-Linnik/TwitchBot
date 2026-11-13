@@ -7,39 +7,65 @@ const streamStatus = require("../twitch/streamStatus.js");
 const TwitchChatAPI = require("../twitch/TwitchChatAPI.js");
 const { parseMentionRedirect, sayMaybeMention } = require("../shared/mentionRedirect.js");
 
-class Counter {
+// A variable name as chat types it after "#": lowercase only, because none of the matchers below
+// lowercase the message - an uppercase name saved anywhere could never be updated from chat.
+// "ё" is a letter of its own, not inside the а-я range, so it is listed separately; without it
+// "#счёт" was cut at "сч". TwitchBot-Web/lib/variableValidation.js holds the same rule for the
+// panel's form.
+const VARIABLE_NAME = '[a-zа-яё0-9]+';
+// "#name + N" / "#name - N" at the very start of a message, and bare "#name" (= + 1).
+const VARIABLE_UPDATE_RE = new RegExp(`^#(${VARIABLE_NAME}) (\\+|-) ([0-9]+)`);
+const VARIABLE_BUMP_RE = new RegExp(`^#(${VARIABLE_NAME})`);
+// Every "#name" inside a command's text, for substituteVariables.
+const VARIABLE_TOKEN_RE = new RegExp(`#(${VARIABLE_NAME})`, 'g');
+
+class Variables {
   constructor()
   {
-    this.counters = {};
-    this.counterAccess = {};
-    this.counterKeysList = [];
+    // channel -> {name: value}
+    this.values = {};
+    // channel -> {name: "all" | "mods"}
+    this.variableAccess = {};
+    // channel -> names, longest first
+    this.variableKeysList = {};
     this.channelsList = [];
-    // Shared per-channel set of usernames exempt from mod-only counter access
-    // checks - one list per channel, used by every counter/custom command in
-    // that channel rather than tracked separately per counter.
+    // Shared per-channel set of usernames exempt from mod-only variable access
+    // checks - one list per channel, used by every variable/custom command in
+    // that channel rather than tracked separately per variable.
     this.customCommandExceptions = {};
-    // Per "channel counterName" last-update timestamp, used to enforce a short
-    // cooldown between updates to the same counter (see updateCounter).
-    this.lastCounterUpdate = new Map();
+    // Per "channel variableName" last-update timestamp, used to enforce a short
+    // cooldown between updates to the same variable (see updateVariable).
+    this.lastVariableUpdate = new Map();
     for (var ch of Object.keys(botInitInfo.channels))
     {
       this.channelsList.push("#"+ch);
     }
-    this.updateCounters();
+    this.updateVariables();
     this.updateCustomCommandExceptions();
   }
 
-  updateCounters = async () =>
+  // Replaces one channel's in-memory snapshot with what `variables` holds now.
+  loadChannelVariables = async (ch) =>
+  {
+    const variables = await ChatStats.getAllVariables(ch);
+    this.values[ch] = {};
+    this.variableAccess[ch] = {};
+    for (const [name, data] of Object.entries(variables)) {
+      this.values[ch][name] = data.value;
+      this.variableAccess[ch][name] = data.access;
+    }
+    this.rebuildKeysList(ch);
+  }
+
+  rebuildKeysList = (ch) =>
+  {
+    this.variableKeysList[ch] = Object.keys(this.values[ch]).sort((a,b) => b.length - a.length);
+  }
+
+  updateVariables = async () =>
   {
     for (var ch of this.channelsList) {
-      const counters = await ChatStats.getAllCounters(ch);
-      this.counters[ch] = {};
-      this.counterAccess[ch] = {};
-      for (const [name, data] of Object.entries(counters)) {
-        this.counters[ch][name] = data.count;
-        this.counterAccess[ch][name] = data.access;
-      }
-      this.counterKeysList[ch] = Object.keys(this.counters[ch]).sort((a,b) => b.length - a.length);
+      await this.loadChannelVariables(ch);
     }
   }
 
@@ -51,26 +77,19 @@ class Counter {
   }
 
   // Brings a channel joined after boot (see twitch/channelJoinScheduler.js) up to the same state
-  // the constructor gives every channel known at startup. Without this, counters/counterAccess/
-  // counterKeysList have no entry for the channel and substituteCounters/updateCounter throw the
-  // first time chat mentions a #counter there. No-op if the channel is already tracked.
+  // the constructor gives every channel known at startup. Without this, values/variableAccess/
+  // variableKeysList have no entry for the channel and substituteVariables/updateVariable throw the
+  // first time chat mentions a #variable there. No-op if the channel is already tracked.
   addChannel = async (channel) =>
   {
     if (this.channelsList.includes(channel)) return;
     this.channelsList.push(channel);
-    const counters = await ChatStats.getAllCounters(channel);
-    this.counters[channel] = {};
-    this.counterAccess[channel] = {};
-    for (const [name, data] of Object.entries(counters)) {
-      this.counters[channel][name] = data.count;
-      this.counterAccess[channel][name] = data.access;
-    }
-    this.counterKeysList[channel] = Object.keys(this.counters[channel]).sort((a, b) => b.length - a.length);
+    await this.loadChannelVariables(channel);
     this.customCommandExceptions[channel] = new Set(await ChatStats.getCustomCommandExceptions(channel));
   }
 
-  // Picks up counter edits made OUTSIDE this process - the TwitchBot-Web panel's
-  // /<channel>/counters page writes the same `counters` collection. Called from
+  // Picks up variable edits made OUTSIDE this process - the TwitchBot-Web panel's
+  // /<channel>/variables page writes the same `variables` collection. Called from
   // CustomCommands.refreshFromDatabase on its 10s tick. Overwriting the in-memory
   // snapshot with fresh DB values can never lose an increment (chat updates go through
   // an atomic $inc and write the returned value back) - at worst a #name substitution
@@ -79,17 +98,10 @@ class Counter {
   {
     for (const ch of this.channelsList) {
       try {
-        const counters = await ChatStats.getAllCounters(ch);
-        this.counters[ch] = {};
-        this.counterAccess[ch] = {};
-        for (const [name, data] of Object.entries(counters)) {
-          this.counters[ch][name] = data.count;
-          this.counterAccess[ch][name] = data.access;
-        }
-        this.counterKeysList[ch] = Object.keys(this.counters[ch]).sort((a,b) => b.length - a.length);
+        await this.loadChannelVariables(ch);
       } catch (err) {
         // Never let a failed refresh kill the interval - the cache just stays as it was.
-        console.error(`[Counter] refresh failed for ${ch}:`, err.message);
+        console.error(`[Variables] refresh failed for ${ch}:`, err.message);
       }
     }
   }
@@ -141,108 +153,126 @@ class Counter {
     return 1;
   }
 
-  addCounter = async(client, channel, userState, message) =>
+  addVariable = async(client, channel, userState, message) =>
   {
     if (!isMod(userState)) {return 0;}
     const settings = channelSettings.getSettings(channel);
-    if (!settings.commands.addcounter.enabled) return 0;
+    if (!settings.commands.addvar.enabled) return 0;
     var access = "all";
-    var res = message.match(channelSettings.getCommandSignatureArgRegex(channel, 'addcounter', '#([a-zа-я0-9]+)'));
+    var res = message.match(channelSettings.getCommandSignatureArgRegex(channel, 'addvar', `#(${VARIABLE_NAME})`));
     if (!res)
     {
-      if (message.startsWith(settings.commands.addcounter.signature)) {
-        client.say(channel, `Неверный формат 😱 Используйте: ${settings.commands.addcounter.signature} #counter_name [mod] 😎`, userState["id"]);
+      if (message.startsWith(settings.commands.addvar.signature)) {
+        client.say(channel, `Неверный формат 😱 Используйте: ${settings.commands.addvar.signature} #имя [mod] 😎`, userState["id"]);
         return 1;
       }
       return 0;
     }
-    var newCounter = res[1];
-    if(message.match(channelSettings.getCommandSignatureArgRegex(channel, 'addcounter', '#([a-zа-я0-9]+) mod'))){
+    var newVariable = res[1];
+    if(message.match(channelSettings.getCommandSignatureArgRegex(channel, 'addvar', `#(${VARIABLE_NAME}) mod`))){
       var access = "mods";
     }
-    if (! await ChatStats.isCounterExist(channel, newCounter)){
-      ChatStats.addNewCounter(channel, newCounter, access);
-      this.counters[channel][newCounter] = 0;
-      this.counterAccess[channel][newCounter] = access;
-      this.counterKeysList[channel] = Object.keys(this.counters[channel]).sort((a,b) => b.length - a.length);
-      client.say(channel, `Новый счетчик успешно добавлен ✅`, userState["id"]);
+    // An existing name is still this command's message: answering it and stopping the chain is
+    // what every other branch here does. Falling through used to mean no reply at all, and the
+    // rest of the handlers getting a look at "!addvar #x".
+    // Asked of the insert itself (the unique index), not of the in-memory mirror: the mirror can
+    // be up to 10s behind a site edit and would call a just-deleted name "taken".
+    const created = await ChatStats.addNewVariable(channel, newVariable, access);
+    if (created === false) {
+      client.say(channel, `Переменная #${newVariable} уже существует 🤷‍♂️`, userState["id"]);
       return 1;
     }
-  }
-
-  getCountersList = async(client,channel, userState, message) =>
-  {
-    if (!isMod(userState)) {return 0;}
-    if (message.match(/!counters/)) {
-      client.say(channel, `[${await this.counterKeysList[channel].toString()}]`);
-    }
-    return 0;
-  }
-
-  deleteCounter = async(client, channel, userState, message) =>
-  {
-    if (!isMod(userState)) {return 0;}
-    const settings = channelSettings.getSettings(channel);
-    if (!settings.commands.delcounter.enabled) return 0;
-    var res = message.match(channelSettings.getCommandSignatureArgRegex(channel, 'delcounter', '#([a-zа-я0-9]+)'));
-    if (!res) {
-      if (message.startsWith(settings.commands.delcounter.signature)) {
-        client.say(channel, `Неверный формат 😱 Используйте: ${settings.commands.delcounter.signature} #counter_name 😎`, userState["id"]);
-        return 1;
-      }
-      return 0;
-    }
-    if (! await ChatStats.isCounterExist(channel, res[1]))
-    { 
-      client.say(channel, `такого счетчика не существует 🤷‍♂️`, userState["id"]);
+    if (created === null) {
+      client.say(channel, `Ошибка создания переменной 😱`, userState["id"]);
       return 1;
     }
-    ChatStats.deleteCounter(channel, res[1]);
-    delete this.counters[channel][res[1]];
-    delete this.counterAccess[channel][res[1]];
-    this.counterKeysList[channel] = Object.keys(this.counters[channel]).sort((a,b) => b.length - a.length);
-    client.say(channel, `Счетчик удален! ❌`, userState["id"]);
+    this.values[channel][newVariable] = 0;
+    this.variableAccess[channel][newVariable] = access;
+    this.rebuildKeysList(channel);
+    client.say(channel, `Новая переменная успешно добавлена ✅`, userState["id"]);
     return 1;
   }
 
-  updateCounter = async(client, channel, userState, message) =>
+  // Matched through the channel's configured signature at the start of the message, like every
+  // other built-in, and returns 1 once answered so the chain stops and CommandExecutionStats counts it.
+  listVariables = async(client, channel, userState, message) =>
   {
-    var res = message.match(/^#([a-zа-я0-9]+) (\+|-) ([0-9]+)/);
+    const settings = channelSettings.getSettings(channel);
+    if (!settings.commands.vars.enabled) return 0;
+    if (!message.toLocaleLowerCase().match(channelSettings.getCommandSignatureRegex(channel, 'vars'))) return 0;
+    if (!isMod(userState)) {return 0;}
+    client.say(channel, `[${this.variableKeysList[channel].toString()}]`);
+    return 1;
+  }
+
+  deleteVariable = async(client, channel, userState, message) =>
+  {
+    if (!isMod(userState)) {return 0;}
+    const settings = channelSettings.getSettings(channel);
+    if (!settings.commands.delvar.enabled) return 0;
+    var res = message.match(channelSettings.getCommandSignatureArgRegex(channel, 'delvar', `#(${VARIABLE_NAME})`));
+    if (!res) {
+      if (message.startsWith(settings.commands.delvar.signature)) {
+        client.say(channel, `Неверный формат 😱 Используйте: ${settings.commands.delvar.signature} #имя 😎`, userState["id"]);
+        return 1;
+      }
+      return 0;
+    }
+    const removed = await ChatStats.deleteVariable(channel, res[1]);
+    if (removed === false)
+    {
+      client.say(channel, `такой переменной не существует 🤷‍♂️`, userState["id"]);
+      return 1;
+    }
+    if (removed === null) {
+      client.say(channel, `Ошибка удаления переменной 😱`, userState["id"]);
+      return 1;
+    }
+    delete this.values[channel][res[1]];
+    delete this.variableAccess[channel][res[1]];
+    this.rebuildKeysList(channel);
+    client.say(channel, `Переменная удалена! ❌`, userState["id"]);
+    return 1;
+  }
+
+  updateVariable = async(client, channel, userState, message) =>
+  {
+    var res = message.match(VARIABLE_UPDATE_RE);
     if (!!res) {
-      var counterName = res[1];
+      var variableName = res[1];
       var operation = res[2];
       var value = parseInt(res[3]);
-    } else if (res = message.match(/^#([a-zа-я0-9]+)/)) {
-      var counterName = res[1];
+    } else if (res = message.match(VARIABLE_BUMP_RE)) {
+      var variableName = res[1];
       var operation = "+";
       var value = 1;
     } else {return 0;}
-    if (!this.counterKeysList[channel].includes(counterName)) {return 1;}
-    var access = this.counterAccess[channel][counterName];
+    if (!this.variableKeysList[channel].includes(variableName)) {return 1;}
+    var access = this.variableAccess[channel][variableName];
     if (access == 'mods' && !isMod(userState) && !this.isCustomCommandException(channel, userState)) {return 1;}
 
     // Chat has real-world latency: two people can both go to update the same
-    // counter within a few seconds of each other without having seen the
+    // variable within a few seconds of each other without having seen the
     // other's message land yet, and end up double-updating it by accident.
-    // A short per-counter cooldown (not a lock - the second attempt is just
+    // A short per-variable cooldown (not a lock - the second attempt is just
     // rejected outright) avoids that instead of trying to serialize genuinely
     // concurrent writes.
-    var cooldownMs = channelSettings.getSettings(channel).commands.counterUpdate.cooldownMs;
-    var cooldownKey = `${channel} ${counterName}`;
-    if (!isTimerReady(this.lastCounterUpdate.get(cooldownKey) || 0, cooldownMs)) {
-      client.say(channel, `Счетчик #${counterName} уже обновляли только что, подождите немного`, userState["id"]);
+    var cooldownMs = channelSettings.getSettings(channel).commands.varUpdate.cooldownMs;
+    var cooldownKey = `${channel} ${variableName}`;
+    if (!isTimerReady(this.lastVariableUpdate.get(cooldownKey) || 0, cooldownMs)) {
+      client.say(channel, `Переменную #${variableName} уже обновляли только что, подождите немного`, userState["id"]);
       return 1;
     }
-    this.lastCounterUpdate.set(cooldownKey, Date.now());
+    this.lastVariableUpdate.set(cooldownKey, Date.now());
 
     var delta = operation === "+" ? value : -value;
-    var newCount = await ChatStats.incrementCounter(channel, counterName, delta);
-    if (newCount === null) {
-      client.say(channel, `Ошибка обновления счетчика 😱`, userState["id"]);
+    var newValue = await ChatStats.incrementVariable(channel, variableName, delta);
+    if (newValue === null) {
+      client.say(channel, `Ошибка обновления переменной 😱`, userState["id"]);
       return 1;
     }
-    this.counters[channel][counterName] = newCount;
-    client.say(channel, `Счетчик #${counterName}: ${newCount} ✅`, userState["id"]);
+    this.values[channel][variableName] = newValue;
+    client.say(channel, `Переменная #${variableName}: ${newValue} ✅`, userState["id"]);
     return 1;
   }
 }
@@ -253,16 +283,16 @@ class CustomCommands {
     // enough to be a rounding error against chat volume: one indexed find per channel per tick.
     static REFRESH_INTERVAL_MS = 10 * 1000;
 
-    constructor(counter) {
+    constructor(variables) {
       // Timer - keyed per "channel commandName" (the CANONICAL name, so a command's aliases share
       // one cooldown with it rather than each getting a free extra trigger), same convention as
-      // Counter's lastCounterUpdate above. It was per-channel until this, and before that a single
+      // Variables' lastVariableUpdate above. It was per-channel until this, and before that a single
       // scalar shared across every channel; both meant one command's cooldown silently blocked
       // unrelated ones - triggering !discord made !youtube unavailable for the next 10s.
       this.customCommandsTimer = 10 * 1000; // 10 sec
       this.lastCustomCommand = new Map();
-      //connect counter
-      this.counter = counter;
+      //connect variables
+      this.variables = variables;
       // custom commands
       this.CommandsKeysList = {};
       this.CommandsDict = {};
@@ -364,8 +394,8 @@ class CustomCommands {
           console.error(`[CustomCommands] refresh failed for ${ch}:`, err.message);
         }
       }
-      // Counters are web-editable too (/<channel>/counters) - refresh them on the same tick.
-      await this.counter.refreshFromDatabase();
+      // Variables are web-editable too (/<channel>/variables) - refresh them on the same tick.
+      await this.variables.refreshFromDatabase();
     }
 
     startAutoRefresh = () =>
@@ -588,13 +618,13 @@ class CustomCommands {
     return 1;
   }
 
-  substituteCounters = (channel, commandResult) =>
+  substituteVariables = (channel, commandResult) =>
   {
-    var res = commandResult.match(/#([a-zа-я0-9]+)/g);
+    var res = commandResult.match(VARIABLE_TOKEN_RE);
     if (res){
       for(const wordReplace of res) {
-        if(counter.counterKeysList[channel].includes(wordReplace.substring(1))){
-          commandResult = commandResult.replace(wordReplace, counter.counters[channel][wordReplace.substring(1)].toString());
+        if(this.variables.variableKeysList[channel].includes(wordReplace.substring(1))){
+          commandResult = commandResult.replace(wordReplace, this.variables.values[channel][wordReplace.substring(1)].toString());
         }
       }
     }
@@ -657,7 +687,7 @@ class CustomCommands {
         // Cooldown is per command, not per channel: two different commands never block each other.
         var cooldownKey = `${channel} ${cmd}`;
         if (!isTimerReady(this.lastCustomCommand.get(cooldownKey) || 0, this.customCommandsTimer)) return 1;
-        var commandResult = this.substituteCounters(channel, await this.resolveCommandText(channel, cmdData));
+        var commandResult = this.substituteVariables(channel, await this.resolveCommandText(channel, cmdData));
         if (cmdData.announce) {
           var broadcasterId = this.getBroadcasterId(channel);
           var sent = broadcasterId && await TwitchChatAPI.sendAnnouncement(broadcasterId, commandResult, cmdData.announceColor);
@@ -741,7 +771,7 @@ class CustomCommands {
         this.scheduleCommand(channel, cmdName, this.autoSendRetryMs);
         return;
       }
-      const commandResult = this.substituteCounters(channel, await this.resolveCommandText(channel, cmd));
+      const commandResult = this.substituteVariables(channel, await this.resolveCommandText(channel, cmd));
       if (cmd.announce) {
         const broadcasterId = this.getBroadcasterId(channel);
         const sent = broadcasterId && await TwitchChatAPI.sendAnnouncement(broadcasterId, commandResult, cmd.announceColor);
@@ -856,11 +886,11 @@ class CustomCommands {
 
 }
 
-const counter = new Counter();
-const customCommands = new CustomCommands(counter);
+const variables = new Variables();
+const customCommands = new CustomCommands(variables);
 
 module.exports = {
-  counter,
+  variables,
   customCommands
 };
 

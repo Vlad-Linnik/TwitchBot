@@ -149,7 +149,7 @@ class ChatStats {
       this.wordsCollection = db.collection('words');
       this.whiteListCollection = db.collection('whiteList');
       this.customCommandsCollection = db.collection("custom_commands");
-      this.countersCollection = db.collection("counters");
+      this.variablesCollection = db.collection("variables");
       this.customCommandExceptions = db.collection("custom_command_exceptions");
       this.modLogs = db.collection("ModeratorActionLogs");
       this.modStats = db.collection("ModeratorStatistics");
@@ -184,6 +184,12 @@ class ChatStats {
       this.streamViewerSamples = db.collection("StreamViewerSamples");
 
       await this.commandStats.createIndex({ channel: 1 }, { unique: true });
+      // The in-memory mirror in commands/CustomCommands.js is keyed by name, so two rows with the
+      // same {channel, name} would make which one wins non-deterministic. Created here as well as
+      // by the site, because the shape is this side's. Logged rather than thrown: a duplicate row
+      // already in the collection must cost the index, not the bot's startup.
+      await this.variablesCollection.createIndex({ channel: 1, name: 1 }, { unique: true })
+        .catch(err => console.error('[DB] variables index error:', err.message));
       await this.modsUpTimeStats.createIndex({ channelId: 1, userId: 1, timestamp: 1 }, { unique: true });
       await this.modsUpTimeStats.createIndex({ channelId: 1, timestamp: 1, hours: -1 });
       await this.modStats.createIndex({ channelId: 1, userId: 1, date: 1 }, { unique: true });
@@ -1594,65 +1600,84 @@ async getUserRank(userId, channel, period) {
     }
   }
 
-  // Counter methods
-  async addNewCounter(channel, counter_name, access) {
+  // Variable methods. The document shape is {channel, name, value, access}: `channel` with its
+  // leading "#", `name` lowercase (see VARIABLE_NAME in commands/CustomCommands.js), `value` an
+  // integer, `access` "all" or "mods". TwitchBot-Web/db/variablesRepo.js writes the same shape
+  // from the panel - this side defines it.
+  // Awaited, and the answer is the insert's own: true = created, false = the name already exists
+  // (the unique index caught it), null = any other failure (logged). Checking first and writing in
+  // the background let two quick "!addvar #x" both report success - the second check ran before
+  // the first insert had landed.
+  async addNewVariable(channel, name, access) {
     await this.ensureInitialized();
-    this.countersCollection.insertOne({channel, counter_name, count: 0, access})
-      .catch(err => console.error('[DB] addNewCounter error:', err));
+    try {
+      await this.variablesCollection.insertOne({channel, name, value: 0, access});
+      return true;
+    } catch (err) {
+      if (err.code === 11000) return false;
+      console.error('[DB] addNewVariable error:', err);
+      return null;
+    }
   }
 
-  async changeCounterAccess(channel, counter_name, new_access) {
+  async changeVariableAccess(channel, name, new_access) {
     await this.ensureInitialized();
-    this.countersCollection.updateOne({channel:channel, counter_name:counter_name},
+    this.variablesCollection.updateOne({channel, name},
     {
       $set: {access: new_access}
-    }).catch(err => console.error('[DB] changeCounterAccess error:', err));
+    }).catch(err => console.error('[DB] changeVariableAccess error:', err));
   }
 
-  async isCounterExist(channel, counter_name) {
+  async variableExists(channel, name) {
     await this.ensureInitialized();
-    return !! await this.countersCollection.findOne( {channel:channel, counter_name:counter_name} );
+    return !! await this.variablesCollection.findOne({channel, name});
   }
 
-  // Atomic increment/decrement so concurrent updates to the same counter can't
+  // Atomic increment/decrement so concurrent updates to the same variable can't
   // clobber each other regardless of the order their writes reach the server -
   // unlike a read-modify-write "$set" of an absolute value, $inc is commutative.
-  // Returns the post-update count (or null if the counter no longer exists).
-  async incrementCounter(channel, counter_name, delta) {
+  // Returns the post-update value (or null if the variable no longer exists).
+  async incrementVariable(channel, name, delta) {
     await this.ensureInitialized();
-    const result = await this.countersCollection.findOneAndUpdate(
-      {channel: channel, counter_name: counter_name},
-      {$inc: {count: delta}},
+    const result = await this.variablesCollection.findOneAndUpdate(
+      {channel, name},
+      {$inc: {value: delta}},
       {returnDocument: 'after'}
     );
-    return result ? result.count : null;
+    return result ? result.value : null;
   }
 
-  async deleteCounter(channel, counter_name) {
+  // true = a row was removed, false = there was none, null = failure (logged). Same reason as
+  // addNewVariable for answering from the write itself.
+  async deleteVariable(channel, name) {
     await this.ensureInitialized();
-    this.countersCollection.deleteOne({channel:channel, counter_name:counter_name})
-      .catch(err => console.error('[DB] deleteCounter error:', err));
-  }
-
-  async getCounter(channel, counter_name){
-    await this.ensureInitialized();
-    var Counter = await this.countersCollection.find({channel: channel, counter_name: counter_name}).toArray();
-    return Counter;
-  }
-
-  async getAllCounters(channel) {
-    await this.ensureInitialized();
-    var Counters = await this.countersCollection.find({channel: channel}).toArray();
-    var CountersDict = {};
-    for (const counter of Counters) {
-        CountersDict[counter["counter_name"]] = {count: counter["count"], access: counter["access"]};
+    try {
+      const res = await this.variablesCollection.deleteOne({channel, name});
+      return res.deletedCount > 0;
+    } catch (err) {
+      console.error('[DB] deleteVariable error:', err);
+      return null;
     }
-    return CountersDict;
   }
 
-  // Custom-command exceptions: usernames exempt from a mod-only counter's access
-  // check. Shared across every custom command/counter in the channel (one list
-  // per channel), rather than tracked separately per counter.
+  async getVariable(channel, name){
+    await this.ensureInitialized();
+    return this.variablesCollection.find({channel, name}).toArray();
+  }
+
+  async getAllVariables(channel) {
+    await this.ensureInitialized();
+    const rows = await this.variablesCollection.find({channel}).toArray();
+    const byName = {};
+    for (const row of rows) {
+        byName[row.name] = {value: row.value, access: row.access};
+    }
+    return byName;
+  }
+
+  // Custom-command exceptions: usernames exempt from a mod-only variable's access
+  // check. Shared across every custom command/variable in the channel (one list
+  // per channel), rather than tracked separately per variable.
   async getCustomCommandExceptions(channel) {
     await this.ensureInitialized();
     const doc = await this.customCommandExceptions.findOne({channel});
