@@ -6,18 +6,15 @@ const channelSettings = require("../config/channelSettings.js");
 const streamStatus = require("../twitch/streamStatus.js");
 const TwitchChatAPI = require("../twitch/TwitchChatAPI.js");
 const { parseMentionRedirect, sayMaybeMention } = require("../shared/mentionRedirect.js");
+const VariableTemplate = require("../shared/variableTemplate.js");
+const { parseArgs, sanitizeArg, assembleMessage, MAX_ARGS_LENGTH } = require("../shared/variableArgs.js");
 
-// A variable name as chat types it after "#": lowercase only, because none of the matchers below
-// lowercase the message - an uppercase name saved anywhere could never be updated from chat.
-// "ё" is a letter of its own, not inside the а-я range, so it is listed separately; without it
-// "#счёт" was cut at "сч". TwitchBot-Web/lib/variableValidation.js holds the same rule for the
-// panel's form.
-const VARIABLE_NAME = '[a-zа-яё0-9]+';
+// A variable name as chat types it after "#" - the rule itself (and why it is lowercase-only)
+// lives in shared/variableTemplate.js, next to the template grammar that reads the same names.
+const VARIABLE_NAME = `[${VariableTemplate.USER_NAME_CHARS}]+`;
 // "#name + N" / "#name - N" at the very start of a message, and bare "#name" (= + 1).
 const VARIABLE_UPDATE_RE = new RegExp(`^#(${VARIABLE_NAME}) (\\+|-) ([0-9]+)`);
 const VARIABLE_BUMP_RE = new RegExp(`^#(${VARIABLE_NAME})`);
-// Every "#name" inside a command's text, for substituteVariables.
-const VARIABLE_TOKEN_RE = new RegExp(`#(${VARIABLE_NAME})`, 'g');
 
 class Variables {
   constructor()
@@ -78,7 +75,7 @@ class Variables {
 
   // Brings a channel joined after boot (see twitch/channelJoinScheduler.js) up to the same state
   // the constructor gives every channel known at startup. Without this, values/variableAccess/
-  // variableKeysList have no entry for the channel and substituteVariables/updateVariable throw the
+  // variableKeysList have no entry for the channel and renderCommandText/updateVariable throw the
   // first time chat mentions a #variable there. No-op if the channel is already tracked.
   addChannel = async (channel) =>
   {
@@ -169,6 +166,13 @@ class Variables {
       return 0;
     }
     var newVariable = res[1];
+    // Built-in names are reserved: a channel variable would win over the built-in (see
+    // shared/variableTemplate.js's checkVariable), so letting one be created here would quietly
+    // switch #username or #rand off in every command of the channel.
+    if (VariableTemplate.isBuiltin(newVariable)) {
+      client.say(channel, `#${newVariable} — это имя встроенной переменной, выберите другое 🤷‍♂️`, userState["id"]);
+      return 1;
+    }
     if(message.match(channelSettings.getCommandSignatureArgRegex(channel, 'addvar', `#(${VARIABLE_NAME}) mod`))){
       var access = "mods";
     }
@@ -618,39 +622,102 @@ class CustomCommands {
     return 1;
   }
 
-  substituteVariables = (channel, commandResult) =>
+  // A command's text -> the message for chat, through shared/variableTemplate.js. `caller` is
+  // {userState, args, mentionTarget} for a command someone typed and null for a timer's
+  // auto-send, which has nobody: per-caller built-ins are then empty, or their fallback text.
+  // Returns "" when nothing is left to send.
+  renderCommandText = (channel, text, { caller = null, category = null, maxLength = VariableTemplate.MAX_MESSAGE_LENGTH } = {}) =>
   {
-    var res = commandResult.match(VARIABLE_TOKEN_RE);
-    if (res){
-      for(const wordReplace of res) {
-        if(this.variables.variableKeysList[channel].includes(wordReplace.substring(1))){
-          commandResult = commandResult.replace(wordReplace, this.variables.values[channel][wordReplace.substring(1)].toString());
-        }
-      }
+    const own = this.variables.values[channel] || {};
+    const settings = channelSettings.getSettings(channel);
+    const cleanOpts = {
+      bannedWords: settings.bannedWords?.words || [],
+      bannedRegex: channelSettings.getBannedWordsRegex(channel),
+    };
+    const resolve = (name, params) => {
+      const check = VariableTemplate.checkVariable(name, params, Object.keys(own));
+      if (!check.ok || check.kind === "unknown") return undefined;
+      if (check.kind === "user") return String(own[name]);
+      return this.resolveBuiltin(channel, name, params, { caller, category, cleanOpts });
+    };
+    const pieces = VariableTemplate.renderPieces(VariableTemplate.tokenize(text), resolve);
+    return assembleMessage(pieces, maxLength);
+  }
+
+  // Values of the cheap built-ins: everything here is already in memory or in the message.
+  // A viewer-supplied value is returned as {text, untrusted: true} so assembleMessage can refuse
+  // to let it open the message with a command character.
+  resolveBuiltin = (channel, name, params, { caller, category, cleanOpts }) =>
+  {
+    const orFallback = (value) => (value ? value : (params || ""));
+    const viewer = (raw, maxLength) => {
+      const value = sanitizeArg(raw, { ...cleanOpts, maxLength });
+      return value ? { text: value, untrusted: true } : (params || "");
+    };
+    const displayName = (userState) => userState["display-name"] || userState["username"] || "";
+
+    const argMatch = name.match(/^argument([1-9])$/);
+    if (argMatch) {
+      return caller ? viewer(caller.args.list[Number(argMatch[1]) - 1]) : orFallback("");
     }
-    return commandResult;
+    switch (name) {
+      case "username":
+        return caller ? orFallback(displayName(caller.userState)) : orFallback("");
+      case "touser": {
+        if (!caller) return orFallback("");
+        const first = (caller.args.list[0] || "").replace(/^@+/, "");
+        const fromArg = first ? sanitizeArg(first, cleanOpts) : "";
+        if (fromArg) return { text: fromArg, untrusted: true };
+        return orFallback(caller.mentionTarget || displayName(caller.userState));
+      }
+      case "args":
+        return caller ? viewer(caller.args.tail, MAX_ARGS_LENGTH) : orFallback("");
+      case "rand": {
+        const { min, max } = VariableTemplate.parseRange(params);
+        return String(min + Math.floor(Math.random() * (max - min + 1)));
+      }
+      case "pick": {
+        const options = VariableTemplate.parsePick(params);
+        return options[Math.floor(Math.random() * options.length)];
+      }
+      case "channel":
+        return channel.replace(/^#/, "");
+      case "game":
+        return orFallback(category || "");
+      // Server clock in the process's time zone - the same clock games/aiReply.js puts into the
+      // model's prompt, so the bot never states two different times.
+      case "time":
+        return new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+      case "date":
+        return new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+      default:
+        return undefined;
+    }
   }
 
   // Picks the text to send: a category override whose name matches the stream's current Twitch
   // category (case-insensitive - mods type it freely on the web panel), or the command's plain
   // `result` for every other category (including offline/unknown, where streamStatus.getCategory
   // returns null). Web-panel-only feature - see lib/commandValidation.js on the TwitchBot-Web side.
-  // Only commands that actually have categoryTexts pay for a live Helix check (streamStatus's
-  // cache is otherwise up to ActivitiTracker's 5-minute poll interval stale) - a mod switching
-  // category mid-stream and immediately triggering the command used to get the old category's
-  // text back. Every other command keeps reading the cheap cached value.
+  // Only commands that actually need the category to be current pay for a live Helix check
+  // (streamStatus's cache is otherwise up to ActivitiTracker's 5-minute poll interval stale): those
+  // with categoryTexts, and those that say #game - a mod switching category mid-stream and
+  // immediately triggering the command used to get the old category back. Every other command
+  // keeps reading the cheap cached value. -> {text, category}
   resolveCommandText = async (channel, cmdData) =>
   {
     const broadcasterId = this.getBroadcasterId(channel);
     const hasCategoryTexts = cmdData.categoryTexts && cmdData.categoryTexts.length;
-    const category = hasCategoryTexts
+    const texts = [cmdData.result, ...(cmdData.categoryTexts || []).map((ct) => ct.result)];
+    const saysGame = texts.some((t) => VariableTemplate.tokenize(t).some((tok) => tok.type === "var" && tok.name === "game"));
+    const category = hasCategoryTexts || saysGame
       ? await streamStatus.refreshCategory(broadcasterId)
       : streamStatus.getCategory(broadcasterId);
     if (category && hasCategoryTexts) {
       const override = cmdData.categoryTexts.find((ct) => ct.category.toLowerCase() === category.toLowerCase());
-      if (override) return override.result;
+      if (override) return { text: override.result, category };
     }
-    return cmdData.result;
+    return { text: cmdData.result, category };
   }
 
   exex_custom_command = async(client, channel, userState, message) =>
@@ -687,7 +754,17 @@ class CustomCommands {
         // Cooldown is per command, not per channel: two different commands never block each other.
         var cooldownKey = `${channel} ${cmd}`;
         if (!isTimerReady(this.lastCustomCommand.get(cooldownKey) || 0, this.customCommandsTimer)) return 1;
-        var commandResult = this.substituteVariables(channel, await this.resolveCommandText(channel, cmdData));
+        var { text, category } = await this.resolveCommandText(channel, cmdData);
+        // Arguments are counted from "!trigger", so in "@user !command a b" the redirect stays
+        // a redirect and "a" is still #argument1.
+        var caller = { userState, args: parseArgs(rest.slice(prefix.length)), mentionTarget };
+        // A plain reply redirected with "@user " is that much longer than what was rendered.
+        var replyPrefixLength = !cmdData.announce && !cmdData.pin && mentionTarget ? mentionTarget.length + 2 : 0;
+        var commandResult = this.renderCommandText(channel, text, {
+          caller, category, maxLength: VariableTemplate.MAX_MESSAGE_LENGTH - replyPrefixLength,
+        });
+        // E.g. a text that is only "#argument1" and was called without one: nothing to say.
+        if (!commandResult) return 1;
         if (cmdData.announce) {
           var broadcasterId = this.getBroadcasterId(channel);
           var sent = broadcasterId && await TwitchChatAPI.sendAnnouncement(broadcasterId, commandResult, cmdData.announceColor);
@@ -771,7 +848,12 @@ class CustomCommands {
         this.scheduleCommand(channel, cmdName, this.autoSendRetryMs);
         return;
       }
-      const commandResult = this.substituteVariables(channel, await this.resolveCommandText(channel, cmd));
+      const { text, category } = await this.resolveCommandText(channel, cmd);
+      const commandResult = this.renderCommandText(channel, text, { caller: null, category });
+      if (!commandResult) {
+        this.scheduleCommand(channel, cmdName, timerMs);
+        return;
+      }
       if (cmd.announce) {
         const broadcasterId = this.getBroadcasterId(channel);
         const sent = broadcasterId && await TwitchChatAPI.sendAnnouncement(broadcasterId, commandResult, cmd.announceColor);
