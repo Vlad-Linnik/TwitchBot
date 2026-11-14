@@ -32,6 +32,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
     update7tv: { enabled: true, cooldownMs: 30000, signature: "!update7tv" },
     randomclip: { enabled: true, cooldownMs: 30000, signature: "!randomclip" },
     weather: { enabled: true, cooldownMs: 15000, signature: "!weather", defaultCity: "" },
+    // !track: the donated clip playing now (commands/nowPlaying.js). Answers only on a channel that
+    // set donation media up on the site; elsewhere it leaves the message to whoever else answers it.
+    track: { enabled: true, cooldownMs: 15000, signature: "!track" },
     muteduel: { enabled: true, cooldownMs: 50000, signature: "!muteduel", acceptSignature: "!muteaccept" },
     longban: { enabled: true, signature: "!longban" },
     cancellongban: { enabled: true, signature: "!cancellongban" },
