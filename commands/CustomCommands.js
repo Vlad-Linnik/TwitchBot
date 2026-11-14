@@ -781,6 +781,10 @@ class CustomCommands {
           await sayMaybeMention(client, channel, mentionTarget, userState["id"], commandResult);
         }
         this.lastCustomCommand.set(cooldownKey, new Date().getTime());
+        // Counted only here, after the answer went out: a call swallowed by modOnly, the cooldown
+        // or an empty render did not make the bot say anything. Keyed by the canonical name, so
+        // an alias counts toward its command. Shown on the site's command list.
+        ChatStats.incrementCustomCommandUses(channel, cmd);
         // someone just said it in chat - push the next auto-send a full period out
         // from now instead of letting it fire again shortly after
         this.resetCommandTimer(channel, cmd);

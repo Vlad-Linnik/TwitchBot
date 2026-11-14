@@ -744,6 +744,18 @@ class ChatStats {
       .catch(err => console.error('[DB] addNewCustomCommand error:', err));
   }
 
+  // `uses` - how many times a viewer's `!name` (or an alias) actually made the bot answer. Timer
+  // auto-sends are not counted: nobody called the command. Written with $inc straight to the
+  // document and never mirrored into CommandsDict, so the 10s refresh and both editors (this
+  // file's editCustomCommand and the site's customCommandsRepo.save) leave it alone - each of them
+  // writes a fixed $set list that does not contain it. The site's reset sets it back to 0 and stamps
+  // `usesResetAt`. Fire-and-forget like the other writes here: a lost increment is not worth a
+  // delayed reply.
+  async incrementCustomCommandUses(channel, command) {
+    await this.ensureInitialized();
+    this.customCommandsCollection.updateOne({ channel, command }, { $inc: { uses: 1 } })
+      .catch(err => console.error('[DB] incrementCustomCommandUses error:', err));
+  }
 
 
   async deleteCustomCommand(channel, command) {
