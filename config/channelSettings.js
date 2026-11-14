@@ -35,6 +35,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
     // !track: the donated clip playing now (commands/nowPlaying.js). Answers only on a channel that
     // set donation media up on the site; elsewhere it leaves the message to whoever else answers it.
     track: { enabled: true, cooldownMs: 15000, signature: "!track" },
+    // !clip hide|show|pause|play|skip: moderators control that clip from chat
+    // (commands/donationMediaControl.js). No cooldown: moderators only, and a repeat is harmless.
+    clip: { enabled: true, signature: "!clip" },
     muteduel: { enabled: true, cooldownMs: 50000, signature: "!muteduel", acceptSignature: "!muteaccept" },
     longban: { enabled: true, signature: "!longban" },
     cancellongban: { enabled: true, signature: "!cancellongban" },

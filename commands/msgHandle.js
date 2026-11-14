@@ -26,6 +26,7 @@ const { syncChannelEmoteSet } = require("../sevenTv/SevenTvEmotes.js");
 const Clips = require("../twitch/clips.js");
 const Weather = require("../twitch/weather.js");
 const { nowPlaying } = require("./nowPlaying.js");
+const { donationMediaControl } = require("./donationMediaControl.js");
 const describeError = require("../shared/describeError.js");
 const { parseMentionRedirect, sayMaybeMention } = require("../shared/mentionRedirect.js");
 
@@ -344,7 +345,7 @@ async function execCommands(client, channel, userState, message) {
   ];
   const asyncCommandsCheck = [
     customCommands.getAllCustomCommands,
-    get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,randomClip,weather,nowPlaying,
+    get_bot_info, topChatters,topSmiles,countUserMsg,updateSevenTvEmotes,count_unique,countWord,randomClip,weather,nowPlaying,donationMediaControl,
     longBan, cancelLongBan, listLongBans,
     customCommands.addCommand,
     customCommands.deleteCustomCommand,
