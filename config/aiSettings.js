@@ -13,7 +13,7 @@ const { connect } = require('../db/db.js');
 // is false: an unreachable config must never mean "spend money on defaults".
 const DEFAULT_AI_CONFIG = {
   enabled: false,
-  model: 'claude-haiku-4-5',
+  model: 'gemini-3.5-flash-lite',
   dailyRequestLimit: 200,
   cooldownMs: 15000,
   // Срок тайм-аута по ступеням тяжести, которую называет модель. timeoutSeconds - средняя ступень:

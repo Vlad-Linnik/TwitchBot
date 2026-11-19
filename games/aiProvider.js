@@ -33,6 +33,10 @@ const PRICING = {
   'claude-sonnet-5': { input: 2, output: 10 },
   'claude-opus-5': { input: 5, output: 25 },
   'gemini-3.5-flash-lite': { input: 0.3, output: 2.5 },
+  // Вводная цена Google до 31.12.2026; с 01.01.2027 она вдвое выше ($1.50 / $7.50), и тогда
+  // эти две строки надо поправить, иначе журнал покажет половину. Проверено 2026-11-19.
+  'gemini-3.6-flash': { input: 0.75, output: 3.75 },
+  'gemini-3.8-flash': { input: 0.75, output: 3.75 },
 };
 
 // Кэш тарифицируется от ВХОДНОЙ цены модели: чтение вдесятеро дешевле (у Anthropic по прайсу, у
@@ -60,6 +64,17 @@ const GOOGLE_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models
 // содержимым - тот самый молчаливый отказ, ради которого потолок ответа и без того завышен.
 // Длину ответа этот запас не трогает: её держит очистка после модели, а не бюджет токенов.
 const THINKING_HEADROOM_TOKENS = 1600;
+
+// Уровень размышления по моделям. По умолчанию minimal - самый быстрый, а чату важна скорость.
+// Но не каждая модель его принимает: gemini-3.8-flash отвечает на minimal 400 «Thinking level
+// MINIMAL is not supported for this model» (проверено 2026-11-19), то есть каждый вызов падал бы,
+// а бот молча уходил бы в скриптовые фразы. Такой модели - самый низкий уровень, который она берёт.
+const THINKING_LEVEL = {
+  'gemini-3.8-flash': 'low',
+};
+function thinkingLevelFor(model) {
+  return THINKING_LEVEL[model] || 'minimal';
+}
 
 const KEY_ENV = {
   anthropic: 'ANTHROPIC_API_KEY',
@@ -198,7 +213,7 @@ async function askGoogle({ model, system, user, tool, maxTokens, timeoutMs }) {
       toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [tool.name] } },
       generationConfig: {
         maxOutputTokens: maxTokens + THINKING_HEADROOM_TOKENS,
-        thinkingConfig: { thinkingLevel: 'minimal' },
+        thinkingConfig: { thinkingLevel: thinkingLevelFor(model) },
       },
     },
     {

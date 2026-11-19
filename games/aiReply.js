@@ -94,7 +94,12 @@ const MAX_TOKENS = 400;
 const MAX_REPLY_CHARS = 500;
 // How long after the viewer's message an answer is still worth sending. Past this the chat has
 // moved on and a reply reads as a non-sequitur, so it is dropped instead.
+//
+// Это НИЖНЯЯ граница, а действующая - не меньше тайм-аута запроса из панели плюс запас (см. send в
+// answer). Пока граница была жёсткой, поднятый в панели тайм-аут ничего не давал: медленная модель
+// (gemini-3.8-flash отвечала за 4-18 с) успевала ответить, а ответ всё равно выбрасывался здесь.
 const LATE_REPLY_MS = 10000;
+const LATE_REPLY_SLACK_MS = 2000;
 // Глубина кольца последних сообщений: столько строк чата уходит в промт как обстановка (см.
 // recentChat ниже), и настолько же далеко назад мы помним, кто говорил.
 const CHAT_CONTEXT_LINES = 10;
@@ -1166,9 +1171,10 @@ async function answer(client, channel, userState, message, cfg, settings, script
   const login = userState['username'];
   const base = { channel, userId: String(userState['user-id']), login, question };
 
+  const lateAfterMs = Math.max(LATE_REPLY_MS, (Number(cfg.requestTimeoutMs) || 0) + LATE_REPLY_SLACK_MS);
   const send = (text) => {
     if (!text) return false;
-    if (Date.now() - receivedAt > LATE_REPLY_MS) return false;
+    if (Date.now() - receivedAt > lateAfterMs) return false;
     client.say(channel, text, userState['id']);
     return true;
   };
