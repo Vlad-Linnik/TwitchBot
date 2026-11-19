@@ -1,12 +1,9 @@
-// The lookup key for both AI-reply lookaside tables: the global filter and the per-channel answer
-// cache. Matching is exact on this key, so this function IS the entire fuzziness budget - "how
-// similar is similar enough" is decided here and nowhere else.
+// The key of a row in the AI channel memory (db/aiStore.js) - the same key the site computes for a
+// hand-written fact, so the bot's wording and an admin's of one fact land on one row instead of two.
 //
 // Deliberately minimal: case, surrounding space, repeated space. In particular it does NOT use
 // shared/Normalization.js's homoglyph folding, which exists to defeat deliberate banned-word
-// obfuscation and is far too aggressive here - it would collapse genuinely different questions
-// onto one another, and the cost of that mistake is the bot answering a real question with a
-// canned line meant for something else.
+// obfuscation and is far too aggressive here - it would merge genuinely different facts.
 //
 // Hand-kept in sync with TwitchBot-Web/lib/aiTextKey.js.
 const MAX_KEY_LENGTH = 300;

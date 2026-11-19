@@ -16,7 +16,12 @@ const DEFAULT_AI_CONFIG = {
   model: 'claude-haiku-4-5',
   dailyRequestLimit: 200,
   cooldownMs: 15000,
+  // Срок тайм-аута по ступеням тяжести, которую называет модель. timeoutSeconds - средняя ступень:
+  // под этим именем срок жил, пока ступеней не было, и уже сохранённое значение так и остаётся
+  // средним.
+  timeoutSecondsLight: 60,
   timeoutSeconds: 600,
+  timeoutSecondsSevere: 3600,
   punishMode: 'observe',
   requestTimeoutMs: 8000,
   memoryPairs: 5,

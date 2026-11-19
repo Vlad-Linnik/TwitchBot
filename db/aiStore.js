@@ -1,18 +1,13 @@
-// Bot-side Mongo access for the AI mention replies: the two lookaside tables checked before any
-// API call, the per-call journal, and the channel memory (one store: facts about the channel
-// and about its viewers live in the same list).
+// Bot-side Mongo access for the AI mention replies: the per-call journal and the channel memory
+// (one store: facts about the channel and about its viewers live in the same list).
 //
-// AiFilter - ПО КАНАЛАМ, а не общий на всех, как было раньше. Заготовку в него пишет сама модель
-// (вердикт filter), и пока таблица была общей, придуманный ею ответ начинал выдаваться во всех
-// каналах сразу и навсегда - без чьего-либо просмотра. Общей она была ради экономии: «привет»
-// значит одно и то же везде, и заново учить каждый канал казалось расточительным. Замер это не
-// подтвердил - за месяцы работы в таблице накопилось девять строк, то есть «переучивание» стоит
-// девять вызовов на канал. Утечка чужого ответа в чужой чат стоит дороже.
+// AiFilter and AiAnswerCache - the two tables of ready-made answers that used to be checked before
+// any API call - are no longer read or written: every question except an emote-only message goes
+// to the model (see games/aiReply.js). The collections themselves are left in the database.
 //
-// This repo owns the document shapes for AiFilter / AiAnswerCache / AiReplyLog /
-// AiChannelMemory - the site reads and curates them (TwitchBot-Web's db/ai*Repo.js)
-// but the bot is what writes them at runtime. Channel keys carry the leading '#', the same convention as every
-// other chat-stat collection in this database.
+// This repo owns the document shapes for AiReplyLog / AiChannelMemory - the site reads and curates
+// them (TwitchBot-Web's db/ai*Repo.js) but the bot is what writes them at runtime. Channel keys
+// carry the leading '#', the same convention as every other chat-stat collection in this database.
 const { connect } = require('./db.js');
 const { aiTextKey } = require('../shared/aiTextKey.js');
 const { factPriority, rankFacts } = require('../shared/memoryRecall.js');
@@ -23,8 +18,6 @@ async function ensureInitialized() {
   if (cols) return cols;
   const db = await connect();
   cols = {
-    filter: db.collection('AiFilter'),
-    cache: db.collection('AiAnswerCache'),
     log: db.collection('AiReplyLog'),
     memory: db.collection('AiChannelMemory'),
     config: db.collection('AiConfig'),
@@ -34,10 +27,6 @@ async function ensureInitialized() {
   // Indexes are created by whichever side touches the collection first; both sides declare the
   // same ones, and createIndex is idempotent.
   await Promise.all([
-    cols.filter.createIndex({ channel: 1, text: 1 }, { unique: true }),
-    cols.cache.createIndex({ channel: 1, text: 1 }, { unique: true }),
-    // Для выборки «о чём этого канала уже спрашивали» - см. recentAnswers ниже.
-    cols.cache.createIndex({ channel: 1, lastHitAt: -1, createdAt: -1 }),
     cols.log.createIndex({ channel: 1, userId: 1, createdAt: -1 }),
     // Под recentReplies: индекс выше начинается с channel, но userId стоит между ним и временем,
     // поэтому порядок по createdAt из него не берётся - выборка «последние ответы канала» без
@@ -48,161 +37,6 @@ async function ensureInitialized() {
     cols.memory.createIndex({ channel: 1, createdAt: 1 }),
   ]);
   return cols;
-}
-
-// --- lookaside tables ------------------------------------------------------
-
-async function findFilterAnswer(channel, text) {
-  const c = await ensureInitialized();
-  const key = aiTextKey(text);
-  if (!key) return null;
-  // ОТВЕЧАЮТ ТОЛЬКО СОГЛАСОВАННЫЕ СТРОКИ. Заготовка уходит в чат вечно, всем и без модели, а
-  // заводит её один разговор с одним человеком - и на живых данных так завелись «запомни, ты
-  // сосал» → «Хорошо, запомнил, что ты сосал ahahah» и «привет, как дела?» → «Привет, лучший
-  // друг!», которая зовёт лучшим другом любого незнакомца. Та же стадия, что у наказаний и у
-  // античита: строка пишется сразу, отвечать начинает после человека.
-  //
-  // Строки, заведённые до появления флага, отвечать перестают - и это правильный исход, а не
-  // потеря: за всё время таблица собрала единицы попаданий, а согласовать её целиком - одно
-  // нажатие в панели.
-  const doc = await c.filter.findOneAndUpdate(
-    { channel, text: key, approved: true },
-    { $inc: { hits: 1 }, $set: { lastHitAt: new Date() } },
-    { returnDocument: 'after' }
-  );
-  // mongodb@6 returns the document itself on a hit and null on a miss; older drivers wrapped it
-  // in { value }. Same unwrap idiom the rest of both repos use.
-  const found = doc && doc.value !== undefined ? doc.value : doc;
-  return found ? found.answer : null;
-}
-
-async function addFilterEntry(channel, text, answer) {
-  const c = await ensureInitialized();
-  const key = aiTextKey(text);
-  if (!key) return;
-  await c.filter.updateOne(
-    { channel, text: key },
-    {
-      $set: { answer: String(answer || '') },
-      // approved только при вставке: согласование - решение человека, и переписанный моделью ответ
-      // не должен его ни ставить, ни снимать. Снимать тоже нельзя - иначе один вызов модели гасил
-      // бы строку, которую человек уже разобрал и одобрил.
-      $setOnInsert: {
-        channel,
-        text: key,
-        source: 'ai',
-        approved: false,
-        hits: 0,
-        lastHitAt: null,
-        createdAt: new Date(),
-      },
-    },
-    { upsert: true }
-  );
-}
-
-async function findCachedAnswer(channel, text) {
-  const c = await ensureInitialized();
-  const key = aiTextKey(text);
-  if (!key) return null;
-  const doc = await c.cache.findOneAndUpdate(
-    { channel, text: key },
-    { $inc: { hits: 1 }, $set: { lastHitAt: new Date() } },
-    { returnDocument: 'after' }
-  );
-  const found = doc && doc.value !== undefined ? doc.value : doc;
-  return found ? found.answer : null;
-}
-
-// Возвращает true, если ответ теперь лежит в кэше - новой строкой или поверх прежней. Это то, что
-// показывает журнал в панели: вопрос не «завели ли строку», а «будет ли следующий такой вопрос
-// бесплатным». Ротацию при этом взводит только вставка: перезапись ничего не добавила.
-//
-// РОТАЦИЯ ПОЯВИЛАСЬ ВМЕСТЕ С ЗАПИСЬЮ С ПЕРВОГО ОБРАЩЕНИЯ. Пока кэш пополнялся только со второго,
-// он рос медленно и потолок был не нужен; теперь сюда попадает всё, что модель назвала вечным, и
-// без потолка страница кэша в панели превратилась бы в свалку - именно то возражение, ради
-// которого когда-то и появилось условие «со второго раза» (см. games/aiReply.js).
-//
-// Вылетает не самый старый, а тот, к которому дольше всего не обращались: строка, которую
-// спрашивают раз в месяц, полезнее записанной вчера и ни разу не пригодившейся. У только что
-// вставленной строки обращений ещё нет, поэтому в сравнении участвует createdAt - иначе она
-// вылетала бы первой же ротацией, не дожив до своего первого попадания.
-async function cacheAnswer(channel, text, answer, max) {
-  const c = await ensureInitialized();
-  const key = aiTextKey(text);
-  if (!key) return false;
-  const res = await c.cache.updateOne(
-    { channel, text: key },
-    {
-      $set: { answer: String(answer || '') },
-      $setOnInsert: { channel, text: key, hits: 0, lastHitAt: null, createdAt: new Date() },
-    },
-    { upsert: true }
-  );
-  const added = Boolean(res.upsertedCount);
-
-  if (added && max > 0) {
-    const total = await c.cache.countDocuments({ channel });
-    if (total > max) {
-      const rows = await c.cache
-        .find({ channel }, { projection: { _id: 1, lastHitAt: 1, createdAt: 1 } })
-        .toArray();
-      rows.sort(
-        (a, b) =>
-          (a.lastHitAt || a.createdAt || 0).valueOf() - (b.lastHitAt || b.createdAt || 0).valueOf()
-      );
-      const stale = rows.slice(0, total - max);
-      if (stale.length) await c.cache.deleteMany({ _id: { $in: stale.map((d) => d._id) } });
-    }
-  }
-  return added || Boolean(res.matchedCount);
-}
-
-// Вопросы этого канала, на которые ответ уже был, - для поиска похожего в
-// shared/memoryRecall.js. Не замена findCachedAnswer: тот отдаёт ответ при точном совпадении и
-// без обращения к модели, а это выборка кандидатов для подсказки в промт.
-//
-// Выборка ограничена и упорядочена по последнему обращению, а не по дате создания: потолок кэша
-// выше того, что имеет смысл читать на горячем пути, и строка, к которой обращались недавно, - и
-// есть та, о которой спросят снова. Тот же порядок, по которому ротация выбирает, что вытеснить.
-async function recentAnswers(channel, limit) {
-  const c = await ensureInitialized();
-  if (!limit) return [];
-  return c.cache
-    .find({ channel }, { projection: { text: 1, answer: 1 } })
-    .sort({ lastHitAt: -1, createdAt: -1 })
-    .limit(limit)
-    .toArray();
-}
-
-// Заготовка устарела: стереть её или переписать. Возвращает число тронутых строк.
-//
-// ПРАВЯТСЯ ВСЕ СТРОКИ КАНАЛА С ЭТИМ ОТВЕТОМ, а не одна показанная модели. Путь cacheSimilar
-// заводит на один и тот же ответ новый ключ при каждой новой формулировке вопроса, поэтому у
-// прижившегося ответа строк обычно несколько; удалив одну, мы оставили бы близнецов, которые
-// отвечают тем же самым и мгновенно - то есть починка была бы незаметной и неполной.
-//
-// Совпадение по тексту ответа, а не по ключу вопроса, потому что устаревает именно утверждение:
-// «стрим в 19:00» неверно во всех формулировках сразу. Ценой этого два разных вопроса с
-// одинаковым коротким ответом («да», «не знаю») чинятся вместе - строка стоит один вызов модели
-// и заводится заново при следующем вопросе, так что цена ошибки здесь ровно один вызов.
-//
-// `hits` и `lastHitAt` при замене не сбрасываются: они про то, как часто СПРАШИВАЮТ, а спрашивать
-// стали не реже оттого, что ответ переписали. По ним же работает вытеснение.
-async function fixCachedAnswer(channel, staleAnswer, replacement) {
-  const c = await ensureInitialized();
-  const answer = String(staleAnswer || '');
-  if (!answer) return 0;
-  const text = String(replacement || '');
-  if (text) {
-    // fixedAt - единственный след того, что строку переписала модель, а не записал первый ответ на
-    // этот вопрос: страница кэша в панели показывает текст, и без отметки исправленная строка
-    // неотличима от исходной.
-    const res = await c.cache.updateMany({ channel, answer }, { $set: { answer: text, fixedAt: new Date() } });
-    return res.modifiedCount || 0;
-  }
-  const res = await c.cache.deleteMany({ channel, answer });
-  return res.deletedCount || 0;
 }
 
 // --- кто на дне шкалы ------------------------------------------------------
@@ -418,8 +252,8 @@ async function recentReplies(channel, limit) {
   return rows.map((r) => String(r.answer));
 }
 
-// Counts only rows that actually reached the API. A filter or cache hit still writes a row (it is
-// part of the conversation, and of the memory) but it cost nothing, so it must not eat the budget.
+// Counts only rows that actually reached the API. A row that cost nothing (an emote echo, a refusal
+// before the call) is still part of the journal, but it must not eat the budget.
 async function countBilledSince(since) {
   const c = await ensureInitialized();
   return c.log.countDocuments({ createdAt: { $gte: since }, billed: true });
@@ -449,12 +283,6 @@ async function streamCard(channelId) {
 }
 
 module.exports = {
-  findFilterAnswer,
-  addFilterEntry,
-  findCachedAnswer,
-  cacheAnswer,
-  fixCachedAnswer,
-  recentAnswers,
   publishBuiltinPrompt,
   listMemory,
   rememberFact,
