@@ -14,6 +14,10 @@ const { connect } = require('../db/db.js');
 const DEFAULT_AI_CONFIG = {
   enabled: false,
   model: 'gemini-3.5-flash-lite',
+  // Модель для запасного запроса и для переключения, когда основная падает раз за разом
+  // (games/aiFallback.js). flash-lite - самая быстрая из бесплатных; совпав с основной, она даёт
+  // просто повтор того же запроса. Пусто - запасной нет, сбой сразу уходит скриптовым фразам.
+  fallbackModel: 'gemini-3.5-flash-lite',
   dailyRequestLimit: 200,
   cooldownMs: 15000,
   // Срок тайм-аута по ступеням тяжести, которую называет модель. timeoutSeconds - средняя ступень:

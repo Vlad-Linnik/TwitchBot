@@ -15,9 +15,18 @@
 // the outcome is a single 'info' line saying it healed itself; stay down past it and it escalates
 // to a real error, followed later by a 'recovery' line closing it out. Either way the panel ends
 // up holding the answer to "and then what happened", which is the thing it never used to record.
+//
+// An incident can also simply stop being reported. Some callers only try when there is something
+// to do - AI replies run only while the channel is live, so a stream that ended mid-outage left
+// "unavailable 18h, 7 failed attempts" on the panel all night: no further call, so no success to
+// close it, and no failure either. So an incident with no new failure for STALE_MS is closed out
+// as "no longer failing". Every poller here retries well inside that window (the slowest, the
+// stream-status tick, every 5 minutes), so a live outage keeps refreshing it and stays open.
 const errorRingBuffer = require('./errorRingBuffer.js');
 
-// key -> { label, since, failures, detail, scopes, timer, escalated, reportedDetail }
+const STALE_MS = 10 * 60 * 1000;
+
+// key -> { label, since, lastFailureAt, failures, detail, scopes, timer, staleTimer, escalated, reportedDetail }
 const states = new Map();
 
 function formatDuration(ms) {
@@ -55,8 +64,8 @@ function reportFailure(key, { label, detail = 'unknown error', scope = '', grace
   let state = states.get(key);
   if (!state) {
     state = {
-      label, since: Date.now(), failures: 0, detail,
-      scopes: new Set(), timer: null, escalated: false, reportedDetail: null,
+      label, since: Date.now(), lastFailureAt: 0, failures: 0, detail,
+      scopes: new Set(), timer: null, staleTimer: null, escalated: false, reportedDetail: null,
     };
     states.set(key, state);
   }
@@ -64,7 +73,14 @@ function reportFailure(key, { label, detail = 'unknown error', scope = '', grace
   state.label = label || state.label;
   state.detail = detail;
   state.failures += 1;
+  state.lastFailureAt = Date.now();
   state.scopes.add(scope);
+
+  // Never shorter than the grace window plus a minute, or an incident could close before it was
+  // ever called one.
+  if (state.staleTimer) clearTimeout(state.staleTimer);
+  state.staleTimer = setTimeout(() => expire(key), Math.max(STALE_MS, graceMs + 60_000));
+  state.staleTimer.unref?.();
 
   if (state.escalated) {
     // An already-reported outage that changes its failure mode is news (a timeout turning into a
@@ -86,6 +102,22 @@ function reportFailure(key, { label, detail = 'unknown error', scope = '', grace
   }
 }
 
+// Nothing has failed for the stale window: the incident is over as far as anyone can tell. It is
+// not a "recovered" line - no call has succeeded, so all that is known is that none failed.
+function expire(key) {
+  const state = states.get(key);
+  if (!state) return;
+  if (state.timer) clearTimeout(state.timer);
+  states.delete(key);
+
+  const down = formatDuration(state.lastFailureAt - state.since);
+  const quiet = formatDuration(Date.now() - state.lastFailureAt);
+  const message = `${state.label}${scopeSuffix(state.scopes)}: no failures for ${quiet}, incident closed` +
+    ` (${state.failures} failed attempt(s) over ${down}, last: ${state.detail}).`;
+  errorRingBuffer.record('info', message);
+  console.log(message);
+}
+
 // The other half: a success only means something when it follows a failure.
 function reportSuccess(key, { label, scope = '' } = {}) {
   const state = states.get(key);
@@ -96,6 +128,7 @@ function reportSuccess(key, { label, scope = '' } = {}) {
   if (state.scopes.size > 0) return;
 
   if (state.timer) clearTimeout(state.timer);
+  if (state.staleTimer) clearTimeout(state.staleTimer);
   states.delete(key);
 
   const name = label || state.label;
@@ -126,4 +159,4 @@ function getSnapshot() {
   }));
 }
 
-module.exports = { reportFailure, reportSuccess, getSnapshot };
+module.exports = { reportFailure, reportSuccess, getSnapshot, STALE_MS };

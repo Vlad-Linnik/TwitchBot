@@ -12,6 +12,11 @@ const botInitInfo = require('../botInitInfo.js');
 const ChatStats = require('../db/chatStats.js');
 
 const API_BASE = 'https://api.frankerfacez.com/v1';
+// FFZ builds a room's answer on demand and caches it: measured 2026-11-20, the first request for
+// #mistercop took 21.8s and the next ones 0.19s. Under the process-wide 15s timeout the cold
+// request was aborted every time, so the sync failed on every attempt. Nobody waits on this call
+// (it runs in the background), so it gets room for the cold build.
+const ROOM_TIMEOUT_MS = 45_000;
 
 // FFZ ships its emotes as numbered "sets": a response carries a `sets` map plus the list of set
 // ids actually enabled. Only the enabled ones render, so only those are emotes here - the global
@@ -37,7 +42,7 @@ async function fetchGlobalEmoteNames() {
 // by definition (a room lists only what it applies), so `sets` is taken whole here.
 async function fetchChannelEmoteNames(broadcasterId) {
   try {
-    const { data } = await axios.get(`${API_BASE}/room/id/${broadcasterId}`);
+    const { data } = await axios.get(`${API_BASE}/room/id/${broadcasterId}`, { timeout: ROOM_TIMEOUT_MS });
     return Object.values(data?.sets ?? {})
       .flatMap(set => set?.emoticons ?? [])
       .map(emote => emote.name)

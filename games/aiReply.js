@@ -78,6 +78,7 @@ const { isTimerReady } = require('../shared/timer.js');
 const memoryRecall = require('../shared/memoryRecall.js');
 const emoteFix = require('../shared/emoteFix.js');
 const aiProvider = require('./aiProvider.js');
+const aiFallback = require('./aiFallback.js');
 const { clean } = require('../shared/textStats.js');
 const healthTracker = require('../shared/healthTracker.js');
 const describeError = require('../shared/describeError.js');
@@ -174,6 +175,15 @@ const HOSTILE_REFRESH_MS = 60000;
 // How long a failing API is treated as a blip rather than an incident - roughly two of anything
 // that would retry, per shared/healthTracker.js's convention.
 const HEALTH_GRACE_MS = 120000;
+const AI_PRIMARY_LABEL = 'AI-ответы: основная модель (отвечает запасная)';
+
+// Ошибка с перечнем попыток (games/aiFallback.js). Одна строка ошибки последней попытки скрывала
+// бы, что перед ней основная модель уже не ответила.
+function describeAttempts(err) {
+  const attempts = err && err.attempts;
+  if (!attempts || attempts.length < 2) return describeError(err);
+  return attempts.map((a) => `${a.model} ${Math.round(a.ms / 100) / 10}s: ${a.error}`).join(' → ');
+}
 
 // Схема ответа модели. Описана в форме Anthropic и на этой стороне одна: перевод её в форму
 // Google, выбор поставщика по имени модели, цены и приведение счёта к общему виду лежат в
@@ -1171,7 +1181,12 @@ async function answer(client, channel, userState, message, cfg, settings, script
   const login = userState['username'];
   const base = { channel, userId: String(userState['user-id']), login, question };
 
-  const lateAfterMs = Math.max(LATE_REPLY_MS, (Number(cfg.requestTimeoutMs) || 0) + LATE_REPLY_SLACK_MS);
+  // Окно на столько попыток, сколько их может быть (games/aiFallback.js): ответ запасной модели,
+  // пришедший после таймаута основной, - всё ещё ответ на этот вопрос, а не опоздание.
+  const lateAfterMs = Math.max(
+    LATE_REPLY_MS,
+    (Number(cfg.requestTimeoutMs) || 0) * aiFallback.attemptsFor(cfg) + LATE_REPLY_SLACK_MS
+  );
   const send = (text) => {
     if (!text) return false;
     if (Date.now() - receivedAt > lateAfterMs) return false;
@@ -1250,10 +1265,10 @@ async function answer(client, channel, userState, message, cfg, settings, script
   let res;
   const startedAt = Date.now();
   try {
-    res = await aiProvider.ask({
-      model: cfg.model,
+    // Модель и таймаут подставляет aiFallback: он же решает, повторить ли сбой на запасной модели
+    // и не пора ли спрашивать её первой.
+    res = await aiFallback.ask(cfg, {
       maxTokens: MAX_TOKENS,
-      timeoutMs: cfg.requestTimeoutMs,
       tool: banAsk ? ANSWER_TOOL_WITH_BAN : ANSWER_TOOL,
       system: buildSystemPrompt(cfg),
       user: buildUserContent({
@@ -1274,14 +1289,28 @@ async function answer(client, channel, userState, message, cfg, settings, script
         openings: recentOpenings(replies),
         chat: chatContext(lines, login, message),
       }),
-    });
+    }, describeError);
     healthTracker.reportSuccess('ai-reply', { label: 'AI-ответы на упоминания', scope: channel });
+    // Основная модель - отдельный инцидент: фича при этом работает, но на запасной, и это надо
+    // видеть, а не узнавать по журналу. Пока переключение держит основную вторым номером, её не
+    // спрашивают вовсе; инцидент тогда закрывается сам через десять минут без новых сбоев.
+    const primaryFailed = res.attempts.find((a) => a.model === cfg.model && a.error);
+    if (res.model === cfg.model) {
+      healthTracker.reportSuccess('ai-primary', { label: AI_PRIMARY_LABEL, scope: cfg.model });
+    } else if (primaryFailed) {
+      healthTracker.reportFailure('ai-primary', {
+        label: AI_PRIMARY_LABEL,
+        detail: primaryFailed.error,
+        scope: cfg.model,
+        graceMs: HEALTH_GRACE_MS,
+      });
+    }
   } catch (err) {
     // Every network-facing subsystem here recovers by itself, so one failed call is not an
     // incident - healthTracker holds it for the grace window and only then calls it one.
     healthTracker.reportFailure('ai-reply', {
       label: 'AI-ответы на упоминания',
-      detail: describeError(err),
+      detail: describeAttempts(err),
       scope: channel,
       graceMs: HEALTH_GRACE_MS,
     });
@@ -1298,12 +1327,14 @@ async function answer(client, channel, userState, message, cfg, settings, script
       verdict: 'normal',
       billed: false,
       sent: false,
-      error: describeError(err),
+      error: describeAttempts(err),
+      attempts: err.attempts || null,
     });
     return;
   }
 
-  billedToday += 1;
+  // Каждая попытка - запрос к поставщику, в том числе неудачная: дневной лимит считает запросы.
+  billedToday += res.attempts.length;
 
   // Принудительный вызов инструмента делает поля ожидаемой формой ответа, но отказ и обрыв по
   // потолку токенов приезжают обычным 200, в котором нет ничего пригодного, - проверяем, а не
@@ -1506,7 +1537,11 @@ async function answer(client, channel, userState, message, cfg, settings, script
     muteSeconds: muteAsk ? muteAsk.seconds : null,
     muteDone,
     muteRefused,
-    model: cfg.model,
+    model: res.model,
+    // Ответила запасная модель: какая была основной и что случилось с каждой попыткой. Пусто,
+    // когда основная ответила с первого раза, - так строки без сбоев не тащат лишнего.
+    fallbackFrom: res.fallbackFrom,
+    attempts: res.attempts.length > 1 ? res.attempts : null,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     cacheReadTokens: usage.cacheReadTokens,
@@ -1514,7 +1549,7 @@ async function answer(client, channel, userState, message, cfg, settings, script
     // поля вызов с промахом мимо кэша нельзя отличить от вызова без кэша вовсе. У поставщика с
     // неявным кэшем ставить её нечем, и поле приезжает пустым - это не промах, а отсутствие платы.
     cacheWriteTokens: usage.cacheWriteTokens,
-    costUsd: aiProvider.costUsd(cfg.model, usage),
+    costUsd: aiProvider.costUsd(res.model, usage),
     latencyMs: Date.now() - startedAt,
   });
 }
