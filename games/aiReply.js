@@ -1153,6 +1153,7 @@ function tryAnswer(client, channel, userState, message, scripted) {
   }
 
   // Кулдаун один на канал: он ограничивает, как часто бот ГОВОРИТ, а не кто его спрашивает.
+  // Держится, пока запрос в пути, и после сбоя; удачный ответ модели снимает его сразу (answer).
   if (!isTimerReady(lastAiReply.get(channel) || 0, cfg.cooldownMs)) return false;
 
   // Дневной лимит здесь НЕ проверяется, хотя раньше проверялся. Он ограничивает трату, а первые
@@ -1164,14 +1165,15 @@ function tryAnswer(client, channel, userState, message, scripted) {
   //
   // Claimed before the async work starts, so a burst of mentions in the same second produces one
   // answer rather than one per message.
-  lastAiReply.set(channel, Date.now());
-  answer(client, channel, userState, message, cfg, settings, scripted).catch((err) =>
+  const claimedAt = Date.now();
+  lastAiReply.set(channel, claimedAt);
+  answer(client, channel, userState, message, cfg, settings, scripted, claimedAt).catch((err) =>
     console.error('[aiReply] unhandled failure:', describeError(err))
   );
   return true;
 }
 
-async function answer(client, channel, userState, message, cfg, settings, scripted) {
+async function answer(client, channel, userState, message, cfg, settings, scripted, claimedAt) {
   // Сообщение уже заявлено как наше, вернуть его в цепочку commands/msgHandle.js нельзя - она
   // давно отработала. Поэтому хвост цепочки передан сюда функцией и вызывается там, где нам
   // сказать нечего.
@@ -1290,6 +1292,12 @@ async function answer(client, channel, userState, message, cfg, settings, script
         chat: chatContext(lines, login, message),
       }),
     }, describeError);
+    // МОДЕЛЬ ОТВЕТИЛА - КУЛДАУН СНЯТ. Он держит канал, пока запрос в пути (пачка упоминаний в одну
+    // секунду даёт один ответ, а не пачку), и остаётся взведённым после сбоя или отказа лимита -
+    // чтобы не долбить лежащий API. После удачного ответа держать следующий вопрос незачем: трату
+    // ограничивает дневной лимит, а не пауза. Снимается только своя отметка: если за время
+    // запроса канал успел взять следующий, его отметку трогать нельзя.
+    if (lastAiReply.get(channel) === claimedAt) lastAiReply.delete(channel);
     healthTracker.reportSuccess('ai-reply', { label: 'AI-ответы на упоминания', scope: channel });
     // Основная модель - отдельный инцидент: фича при этом работает, но на запасной, и это надо
     // видеть, а не узнавать по журналу. Пока переключение держит основную вторым номером, её не
