@@ -17,6 +17,26 @@ const API_BASE = 'https://api.frankerfacez.com/v1';
 // request was aborted every time, so the sync failed on every attempt. Nobody waits on this call
 // (it runs in the background), so it gets room for the cold build.
 const ROOM_TIMEOUT_MS = 45_000;
+// The global set is the same for every channel and changes a few times a year. It used to be
+// requested once per channel per sync, so one slow answer from FFZ (2026-11-21: the global set
+// timed out from the VPS while answering in 0.2s elsewhere) failed every channel at once - four
+// identical red lines in the same second at startup. Now it is fetched once and shared, refreshed
+// after GLOBAL_TTL_MS, and a failed refresh keeps the last list that did arrive: a stale global
+// set is still the right set, while an error blocks the whole sync (and with it the prune).
+const GLOBAL_TIMEOUT_MS = 45_000;
+const GLOBAL_TTL_MS = 6 * 60 * 60 * 1000;
+let globalCache = null; // { names, at }
+let globalInFlight = null;
+
+// Says which of the two requests failed - "timeout of 15000ms exceeded" alone does not. A new
+// error, not the old one renamed: one failed global request is awaited by every channel syncing
+// at that moment, and renaming the shared object would stack the prefix once per channel.
+function labelled(what, err) {
+  const out = new Error(`${what}: ${err.message}`);
+  out.code = err.code;
+  out.response = err.response;
+  return out;
+}
 
 // FFZ ships its emotes as numbered "sets": a response carries a `sets` map plus the list of set
 // ids actually enabled. Only the enabled ones render, so only those are emotes here - the global
@@ -33,9 +53,26 @@ function namesFromSets(data) {
     .filter(Boolean);
 }
 
-async function fetchGlobalEmoteNames() {
-  const { data } = await axios.get(`${API_BASE}/set/global`);
-  return namesFromSets(data);
+async function fetchGlobalEmoteNames(force = false) {
+  if (!force && globalCache && Date.now() - globalCache.at < GLOBAL_TTL_MS) return globalCache.names;
+  if (!globalInFlight) {
+    globalInFlight = axios
+      .get(`${API_BASE}/set/global`, { timeout: GLOBAL_TIMEOUT_MS })
+      .then(({ data }) => {
+        globalCache = { names: namesFromSets(data), at: Date.now() };
+        return globalCache.names;
+      })
+      .finally(() => { globalInFlight = null; });
+  }
+  try {
+    return await globalInFlight;
+  } catch (err) {
+    if (globalCache) {
+      console.log(`[FFZ] global set refresh failed, keeping the list from ${new Date(globalCache.at).toISOString()}: ${err.message}`);
+      return globalCache.names;
+    }
+    throw labelled('global set', err);
+  }
 }
 
 // A channel with no FFZ room is a 404 - "no set", not a failure. Its room sets are all enabled
@@ -49,7 +86,7 @@ async function fetchChannelEmoteNames(broadcasterId) {
       .filter(Boolean);
   } catch (err) {
     if (err.response?.status === 404) return [];
-    throw err;
+    throw labelled('room', err);
   }
 }
 
