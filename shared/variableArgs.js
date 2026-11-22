@@ -9,7 +9,7 @@
 //   1. invisible characters removed (textStats.clean);
 //   2. links removed, with the same two patterns games/aiReply.js's sanitizeReply uses;
 //   3. a value containing a word from the channel's banned list becomes empty - checked both on
-//      the lowercased text (what isInsult does) and through Normalization.js's homoglyph folding,
+//      the lowercased text (what isInsult does) and through a homoglyph fold (foldForBanCheck),
 //      because an argument is exactly where "obfuscated on purpose" text arrives;
 //   4. length capped: one argument MAX_ARG_LENGTH, #args MAX_ARGS_LENGTH.
 // "@" stays: "!обнять @вася" is the point of the feature, and a mass ping is impossible because
@@ -17,7 +17,6 @@
 // put at the very start of the message is stripped where the message is assembled
 // (commands/CustomCommands.js), since only there is it known what ends up first.
 const { clean } = require("./textStats.js");
-const Normalization = require("./Normalization.js");
 
 const MAX_ARGS = 9;
 const MAX_ARG_LENGTH = 50;
@@ -34,13 +33,42 @@ function parseArgs(afterTrigger) {
   return { list, tail };
 }
 
+// Obfuscation fold for the banned-word check: Latin lookalikes become the Cyrillic letters they
+// imitate ("xуй" -> "хуй", "ЧМ0" -> "чмо"), accents go ("ё" -> "е", "й" -> "и"), and everything that
+// is not a letter or digit is dropped INSIDE a word ("х.у.й", "х_у_й"), while the gap between words
+// stays a single space.
+//
+// It folds toward Cyrillic, not the other way, on purpose. Normalization.normalizeText maps
+// Cyrillic to Latin and DROPS every letter with no Latin twin (ч, ш, г, и, б, ...), so a banned
+// word shrinks to a fragment that ordinary text contains: "чмо" -> "mo" matched "Москве", "хуй" ->
+// "xy" matched any "ху", "шизик" -> "3k". Here every Cyrillic letter survives, so a word can only
+// match itself. Keeping word gaps does the same job for short words across a boundary ("мало
+// хорошего" is not "лох"); letters spaced out one by one are the price - the bannedRegex check on
+// the raw text is unchanged and still catches the word written plainly.
+const LATIN_LOOKALIKES = {
+  a: "а", b: "в", c: "с", e: "е", h: "н", k: "к", m: "м", o: "о", p: "р", t: "т", x: "х", y: "у",
+  "0": "о", "3": "з",
+};
+
+function foldForBanCheck(text) {
+  return String(text ?? "")
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[a-z0-9]/g, (ch) => LATIN_LOOKALIKES[ch] || ch)
+    .split(/\s+/)
+    .map((word) => word.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter(Boolean)
+    .join(" ");
+}
+
 function containsBannedWord(text, bannedWords, bannedRegex) {
   const lower = text.toLowerCase();
   if (bannedRegex && bannedRegex.test(lower)) return true;
-  const folded = Normalization.normalizeText(text);
+  const folded = foldForBanCheck(text);
   if (!folded) return false;
   for (const word of bannedWords || []) {
-    const w = Normalization.normalizeText(String(word));
+    const w = foldForBanCheck(word);
     if (w && folded.includes(w)) return true;
   }
   return false;
@@ -88,4 +116,4 @@ function assembleMessage(pieces, maxLength) {
   return truncate(text, maxLength);
 }
 
-module.exports = { parseArgs, sanitizeArg, containsBannedWord, assembleMessage, MAX_ARGS, MAX_ARG_LENGTH, MAX_ARGS_LENGTH };
+module.exports = { parseArgs, sanitizeArg, containsBannedWord, foldForBanCheck, assembleMessage, MAX_ARGS, MAX_ARG_LENGTH, MAX_ARGS_LENGTH };
