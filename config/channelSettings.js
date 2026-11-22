@@ -43,6 +43,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
     // !clip hide|show|pause|play|skip: moderators control that clip from chat
     // (commands/donationMediaControl.js). No cooldown: moderators only, and a repeat is harmless.
     clip: { enabled: true, signature: "!clip" },
+    // !sr <link>: a song request into the donation media queue (commands/songRequest.js). Off by
+    // default - a channel decides to let chat put things on stream; `access` "mods" | "all".
+    // The cooldown is per viewer and skips moderators.
+    sr: { enabled: false, cooldownMs: 30000, signature: "!sr", access: "mods" },
     muteduel: { enabled: true, cooldownMs: 50000, signature: "!muteduel", acceptSignature: "!muteaccept" },
     longban: { enabled: true, signature: "!longban" },
     cancellongban: { enabled: true, signature: "!cancellongban" },
