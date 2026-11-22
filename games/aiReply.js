@@ -1094,15 +1094,24 @@ function buildUserContent({ channel, question, login, role, card, rmtRestrict, b
 // Synchronous eligibility check. Returning true means "this message is mine, a reply is on its
 // way" - the caller must not fall through to the scripted replies. Everything expensive happens
 // after the caller has already returned.
+// Почему упоминание ушло мимо ИИ - одной строкой в обычный лог. Отказ здесь не пишется в журнал
+// (иначе журнал на две трети состоял бы из упоминаний вне эфира), и без этой строки «бот молчит»
+// не отличить от «бот не в эфире», «ИИ выключен» или «держится кулдаун»: всё выглядит одинаково -
+// ни строки в журнале, ни ошибки.
+function refuse(channel, userState, reason) {
+  console.log(`[aiReply] skip ${channel} ${userState['username']}: ${reason}`);
+  return false;
+}
+
 function tryAnswer(client, channel, userState, message, scripted) {
   const cfg = aiSettings.get();
-  if (!cfg.enabled) return false;
+  if (!cfg.enabled) return refuse(channel, userState, 'AI switched off in AiConfig');
   // Ключ спрашивается у поставщика выбранной модели, а не у одного зашитого имени переменной:
   // ключи у поставщиков свои, и выбранная в панели модель решает, какой из них нужен.
-  if (!aiProvider.hasKey(cfg.model)) return false;
+  if (!aiProvider.hasKey(cfg.model)) return refuse(channel, userState, `no API key for ${cfg.model}`);
 
   const settings = channelSettings.getSettings(channel);
-  if (!settings.ai || !settings.ai.enabled) return false;
+  if (!settings.ai || !settings.ai.enabled) return refuse(channel, userState, 'AI switched off for the channel');
 
   // Не в эфире - не отвечаем. Проверка синхронная и потому читает не базу, а общий реестр
   // twitch/streamStatus.js, который наполняет опрос ActivitiTracker: до первого успешного опроса
@@ -1111,9 +1120,11 @@ function tryAnswer(client, channel, userState, message, scripted) {
   //
   // В debug-режиме проверка снимается - тем же приёмом и по той же причине, что у авто-отправок
   // в commands/CustomCommands.js: локальная проверка не должна требовать настоящего стрима.
-  if (!botInitInfo.settings['debug'] && !streamStatus.isLive(broadcasterIdOf(channel))) return false;
+  if (!botInitInfo.settings['debug'] && !streamStatus.isLive(broadcasterIdOf(channel))) {
+    return refuse(channel, userState, `not live (broadcaster ${broadcasterIdOf(channel)})`);
+  }
 
-  if (isBotSender(userState)) return false;
+  if (isBotSender(userState)) return refuse(channel, userState, 'sender is a known bot');
 
   // Ступень нулевая и единственная бесплатная целиком: сообщение из одних смайликов канала.
   // Раньше такое уходило в модель, она честно платила за «AROLF» и заводила на него заготовку в
@@ -1154,7 +1165,10 @@ function tryAnswer(client, channel, userState, message, scripted) {
 
   // Кулдаун один на канал: он ограничивает, как часто бот ГОВОРИТ, а не кто его спрашивает.
   // Держится, пока запрос в пути, и после сбоя; удачный ответ модели снимает его сразу (answer).
-  if (!isTimerReady(lastAiReply.get(channel) || 0, cfg.cooldownMs)) return false;
+  if (!isTimerReady(lastAiReply.get(channel) || 0, cfg.cooldownMs)) {
+    const ageS = Math.round((Date.now() - (lastAiReply.get(channel) || 0)) / 1000);
+    return refuse(channel, userState, `cooldown (claimed ${ageS}s ago, cooldown ${cfg.cooldownMs / 1000}s)`);
+  }
 
   // Дневной лимит здесь НЕ проверяется, хотя раньше проверялся. Он ограничивает трату, а первые
   // три ступени пути (фильтр, кэш, тот же вопрос другими словами) не тратят ничего - отказывать
@@ -1167,6 +1181,9 @@ function tryAnswer(client, channel, userState, message, scripted) {
   // answer rather than one per message.
   const claimedAt = Date.now();
   lastAiReply.set(channel, claimedAt);
+  // Пара к refuse: принятое упоминание тоже видно в логе, и если за этой строкой не последовала
+  // строка журнала, значит, путь застрял уже внутри answer(), а не на входе.
+  console.log(`[aiReply] take ${channel} ${userState['username']} (${cfg.model})`);
   answer(client, channel, userState, message, cfg, settings, scripted, claimedAt).catch((err) =>
     console.error('[aiReply] unhandled failure:', describeError(err))
   );
