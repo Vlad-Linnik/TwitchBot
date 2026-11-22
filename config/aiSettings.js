@@ -56,13 +56,39 @@ async function ensureCollection() {
   return collection;
 }
 
+// Сколько ждать одно чтение настроек. Без предела зависшее чтение навсегда занимало `refreshing`:
+// следующие get() возвращали тот же незавершённый промис, новое чтение не начиналось, и бот жил на
+// значениях по умолчанию - то есть с выключенным ИИ, - пока его не перезапустят, не оставляя ни
+// строки в журнале, ни ошибки в логе. Так оно и выглядело на проде с 2026-11-20.
+const REFRESH_TIMEOUT_MS = 10000;
+
+function withTimeout(promise, ms, what) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} did not finish in ${ms / 1000}s`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 function refresh() {
   if (refreshing) return refreshing;
   refreshing = (async () => {
     try {
-      const col = await ensureCollection();
-      const doc = await col.findOne({ _id: 'global' });
-      cached = { ...DEFAULT_AI_CONFIG, ...(doc || {}) };
+      const col = await withTimeout(ensureCollection(), REFRESH_TIMEOUT_MS, 'Mongo connect');
+      const doc = await withTimeout(
+        col.findOne({ _id: 'global' }, { maxTimeMS: REFRESH_TIMEOUT_MS }),
+        REFRESH_TIMEOUT_MS,
+        'AiConfig read'
+      );
+      const next = { ...DEFAULT_AI_CONFIG, ...(doc || {}) };
+      // Строка в лог только на смену «включено/выключено»: это единственное значение отсюда, от
+      // которого бот целиком перестаёт отвечать, и по логу должно быть видно, когда это случилось.
+      if (!cached || Boolean(cached.enabled) !== Boolean(next.enabled)) {
+        console.log(`[aiSettings] AI replies ${next.enabled ? 'enabled' : 'disabled'} (model ${next.model})`);
+      }
+      cached = next;
       expiresAt = Date.now() + CACHE_TTL_MS;
     } catch (err) {
       console.error('[aiSettings] Mongo refresh failed:', err.message);
