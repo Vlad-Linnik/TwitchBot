@@ -38,7 +38,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
     // before then keep it). `reply` picks the parts of the answer - see nowPlaying.js.
     track: {
       enabled: true, cooldownMs: 15000, signature: "!song",
-      reply: { title: true, link: true, donor: true, amount: true },
+      reply: { title: true, author: false, link: true, donor: true, amount: true },
     },
     // !clip hide|show|pause|play|skip: moderators control that clip from chat
     // (commands/donationMediaControl.js). No cooldown: moderators only, and a repeat is harmless.
