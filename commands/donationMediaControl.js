@@ -12,11 +12,11 @@
 //
 // Decisions:
 //   - The command names the clip it is about: the `item.id` of the now-playing row
-//     (DonationMediaNowPlaying, the same row !track reads). Chat is seconds behind the stream, and
+//     (DonationMediaNowPlaying, the same row !song reads). Chat is seconds behind the stream, and
 //     two moderators typing "!clip skip" at once must skip one clip, not two - the second finds the
 //     clip already gone and is told so.
 //   - No now-playing row means the channel never set donation media up: the message is left alone
-//     (returns 0), as !track does. A row with nothing playing (or a stale one) gets an answer.
+//     (returns 0), as !song does. A row with nothing playing (or a stale one) gets an answer.
 //   - The badge check here is only a filter. The site checks again with its own rules, so a
 //     moderator the owner denied the donation media section on the site cannot do from chat what
 //     they cannot do from the panel.

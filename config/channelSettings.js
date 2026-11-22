@@ -32,9 +32,14 @@ const DEFAULT_CHANNEL_SETTINGS = {
     update7tv: { enabled: true, cooldownMs: 30000, signature: "!update7tv" },
     randomclip: { enabled: true, cooldownMs: 30000, signature: "!randomclip" },
     weather: { enabled: true, cooldownMs: 15000, signature: "!weather", defaultCity: "" },
-    // !track: the donated clip playing now (commands/nowPlaying.js). Answers only on a channel that
+    // !song: the donated clip playing now (commands/nowPlaying.js). Answers only on a channel that
     // set donation media up on the site; elsewhere it leaves the message to whoever else answers it.
-    track: { enabled: true, cooldownMs: 15000, signature: "!track" },
+    // The key stays `track` (the trigger was !track until 2026-11; channels that saved settings
+    // before then keep it). `reply` picks the parts of the answer - see nowPlaying.js.
+    track: {
+      enabled: true, cooldownMs: 15000, signature: "!song",
+      reply: { title: true, link: true, donor: true, amount: true },
+    },
     // !clip hide|show|pause|play|skip: moderators control that clip from chat
     // (commands/donationMediaControl.js). No cooldown: moderators only, and a repeat is harmless.
     clip: { enabled: true, signature: "!clip" },

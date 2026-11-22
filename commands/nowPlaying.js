@@ -1,4 +1,4 @@
-// !track - names the donated clip the channel's OBS player is showing right now.
+// !song (was !track) - names the donated clip the channel's OBS player is showing right now.
 //
 // The queue lives in TwitchBot-Web (realtime/donationMediaManager.js, web db); the bot sees only
 // the one row the site publishes for it, DonationMediaNowPlaying in the shared db (contract in
@@ -7,7 +7,7 @@
 //
 // Three things decide what is said:
 //   - No row at all means the channel never set donation media up. The command then does not claim
-//     the message (returns 0), so a channel already answering "!track" with another bot keeps it.
+//     the message (returns 0), so a channel already answering "!song" with another bot keeps it.
 //   - A row whose updatedAt is older than STALE_MS is read as "nothing plays": the site re-writes
 //     a playing row every minute (NOW_PLAYING_REFRESH_MS there), so an old one is left behind by a
 //     web process that died mid-clip.
@@ -15,6 +15,12 @@
 //     under the bot's moderator name, which passes neither AutoMod nor the link ban. So both go
 //     through variableArgs.sanitizeArg, like a viewer's command argument. The link is built here
 //     from the video id, never taken from the row as text.
+//   - Which parts go into the line is the channel's choice (`commands.track.reply`: title, link,
+//     donor, amount; every part on by default). A streamer who does not want donors' names or sums
+//     read out in chat switches them off on the site. "donor" also covers `addedBy` - the name of
+//     whoever put the clip in the queue by hand - because both answer "who ordered this". The clip
+//     itself is always identified: with both title and link off, or a title-only setting on a clip
+//     with no title, the link is said anyway rather than an answer that names nothing.
 const { connect } = require("../db/db.js");
 const channelSettings = require("../config/channelSettings.js");
 const botInitInfo = require("../botInitInfo.js");
@@ -48,7 +54,9 @@ function formatAmount(amount) {
 }
 
 // row -> the chat line, or null when nothing (usable) plays. Pure, for a throwaway check script.
-function describe(row, { now = Date.now(), bannedWords = [], bannedRegex = null } = {}) {
+const DEFAULT_REPLY = { title: true, link: true, donor: true, amount: true };
+
+function describe(row, { now = Date.now(), bannedWords = [], bannedRegex = null, reply = DEFAULT_REPLY } = {}) {
   if (!row || !row.item) return null;
   const updatedAt = row.updatedAt ? new Date(row.updatedAt).getTime() : 0;
   if (!updatedAt || now - updatedAt > STALE_MS) return null;
@@ -56,12 +64,15 @@ function describe(row, { now = Date.now(), bannedWords = [], bannedRegex = null 
   if (!VIDEO_ID_RE.test(String(item.videoId || ""))) return null;
 
   const clean = (text, maxLength) => (text ? sanitizeArg(text, { bannedWords, bannedRegex, maxLength }) : "");
-  const title = clean(item.title, MAX_TITLE);
-  const donor = clean(item.donor, MAX_DONOR);
-  const addedBy = clean(item.addedBy, MAX_DONOR);
-  const amount = formatAmount(item.amount);
+  // A missing key reads as "on": a channel saved before this setting existed keeps the full line.
+  const show = (key) => reply?.[key] !== false;
+  const title = show("title") ? clean(item.title, MAX_TITLE) : "";
+  const donor = show("donor") ? clean(item.donor, MAX_DONOR) : "";
+  const addedBy = show("donor") ? clean(item.addedBy, MAX_DONOR) : "";
+  const amount = show("amount") ? formatAmount(item.amount) : "";
+  const link = show("link") || !title ? `https://youtu.be/${item.videoId}` : "";
 
-  let line = `🎵 Сейчас играет: ${title ? `${title} — ` : ""}https://youtu.be/${item.videoId}`;
+  let line = `🎵 Сейчас играет: ${[title, link].filter(Boolean).join(" — ")}`;
   if (donor && amount) line += ` · донат от ${donor}, ${amount}`;
   else if (donor) line += ` · донат от ${donor}`;
   else if (amount) line += ` · донат ${amount}`;
@@ -96,6 +107,7 @@ async function nowPlaying(client, channel, userState, message) {
   const line = describe(row, {
     bannedWords: settings.bannedWords?.words || [],
     bannedRegex: channelSettings.getBannedWordsRegex(channel),
+    reply: conf.reply,
   });
   sayMaybeMention(client, channel, mentionTarget, userState["id"], line || "Сейчас ролик за донат не играет");
   return 1;
