@@ -310,6 +310,10 @@ class CustomCommands {
       }
       // per-channel map of cmdName -> active setTimeout handle for the timer-driven auto-send
       this.commandTimers = {};
+      // per-channel map of cmdName -> {period, nextAt} for every armed handle above: what
+      // syncChannelSchedule() needs to tell an unchanged timer from a changed one and to find
+      // a free slot for a new one without disturbing the rest.
+      this.timerMeta = {};
       this.client = null;
       // per-channel count of ordinary (non-bot) chat messages seen since the last
       // auto-send; reset to 0 on every auto-send so it also enforces "no two
@@ -357,10 +361,9 @@ class CustomCommands {
     }
 
     // Only the parts of a command that affect the AUTO-SEND SCHEDULE. Used to decide whether a
-    // refresh has to rebuild the timers, because rebuilding is not free: scheduleChannelCommands()
-    // re-staggers the whole channel, so doing it on every poll would keep resetting the phase of
-    // commands whose timers never changed, and they'd drift instead of firing on their period.
-    // `enabled` is included because scheduleChannelCommands() excludes disabled commands from the
+    // refresh has to sync the timers. syncChannelSchedule() leaves unchanged timers alone, so this
+    // is only a cheap way to skip the walk when nothing about the schedule moved.
+    // `enabled` is included because syncChannelSchedule() excludes disabled commands from the
     // schedule entirely - toggling it on/off has to rebuild just like a timer change would.
     // Command TEXT (including per-category overrides) can change freely without any of that.
     timerSignature = (commands) =>
@@ -390,8 +393,8 @@ class CustomCommands {
           this.rebuildTriggerIndex(ch);
 
           if (before !== after) {
-            this.scheduleChannelCommands(ch);
-            console.log(`[CustomCommands] ${ch}: timer schedule changed externally, rebuilt`);
+            this.syncChannelSchedule(ch);
+            console.log(`[CustomCommands] ${ch}: timer schedule changed externally, synced`);
           }
         } catch (err) {
           // Never let a failed refresh kill the interval - the cache just stays as it was.
@@ -502,8 +505,8 @@ class CustomCommands {
       var existingResult = this.CommandsDict[channel][cmdName]["result"];
       ChatStats.editCustomCommand(channel, cmdName, existingResult, newTimer, existingPin, existingAnnounce, existingAnnounceColor, existingEnabled, existingCategoryTexts, existingModOnly, existingAliases);
       this.CommandsDict[channel][cmdName] = {result: existingResult, timer: newTimer, pin: existingPin, announce: existingAnnounce, announceColor: existingAnnounceColor, enabled: existingEnabled, categoryTexts: existingCategoryTexts, modOnly: existingModOnly, aliases: existingAliases};
-      // timer membership/period changed for this channel - recompute the stagger for the whole group
-      this.scheduleChannelCommands(channel);
+      // only this command's slot changes - the other timers keep their phase
+      this.syncChannelSchedule(channel);
       client.say(channel, newTimer
         ? `Таймер для !${cmdName} установлен: ${newTimerSeconds} сек ✅`
         : `Таймер для !${cmdName} отключен ✅`, userState["id"]);
@@ -617,7 +620,7 @@ class CustomCommands {
     ChatStats.deleteCustomCommand(channel, res[1]);
     delete this.CommandsDict[channel][res[1]];
     this.rebuildTriggerIndex(channel);
-    this.scheduleChannelCommands(channel);
+    this.syncChannelSchedule(channel);
     client.say(channel, `Команда удалена! ❌`, userState["id"]);
     return 1;
   }
@@ -831,14 +834,21 @@ class CustomCommands {
   scheduleCommand = (channel, cmdName, delay) =>
   {
     if (!this.commandTimers[channel]) this.commandTimers[channel] = {};
+    if (!this.timerMeta[channel]) this.timerMeta[channel] = {};
     if (this.commandTimers[channel][cmdName]) {
       clearTimeout(this.commandTimers[channel][cmdName]);
     }
+    const scheduled = this.CommandsDict[channel] && this.CommandsDict[channel][cmdName];
+    this.timerMeta[channel][cmdName] = {
+      period: scheduled ? parseInt(scheduled.timer, 10) : NaN,
+      nextAt: Date.now() + delay,
+    };
     this.commandTimers[channel][cmdName] = setTimeout(async () => {
       const cmd = this.CommandsDict[channel] && this.CommandsDict[channel][cmdName];
       const timerMs = cmd ? parseInt(cmd.timer, 10) : NaN;
       if (!cmd || !timerMs || timerMs <= 0) {
         delete this.commandTimers[channel][cmdName];
+        delete this.timerMeta[channel][cmdName];
         return;
       }
       // Disabled since this fire was scheduled (refreshFromDatabase rebuilds the whole schedule
@@ -888,8 +898,8 @@ class CustomCommands {
   // Rebuilds the entire auto-send schedule for a channel. Commands sharing the exact same
   // `timer` period are spread evenly across that period (stagger = period / groupSize) so
   // e.g. two commands both on a 2-minute timer end up 1 minute apart instead of firing
-  // together. Called on startup and whenever a channel's timer-command membership/period
-  // changes (!settimer, !delcommand).
+  // together. Called only on startup / when a channel is joined: it restarts every cycle, and the
+  // first command of each group fires at once. Later changes go through syncChannelSchedule().
   scheduleChannelCommands = (channel) =>
   {
     if (!this.client) return;
@@ -899,6 +909,7 @@ class CustomCommands {
       }
     }
     this.commandTimers[channel] = {};
+    this.timerMeta[channel] = {};
 
     const commands = this.CommandsDict[channel] || {};
     const groups = new Map(); // timerMs -> [cmdName, ...]
@@ -916,6 +927,67 @@ class CustomCommands {
         this.scheduleCommand(channel, cmdName, Math.round(stagger * i));
       });
     }
+  }
+
+  // Brings the running schedule in line with CommandsDict after a change (!settimer,
+  // !delcommand, an edit on the website) WITHOUT restarting anything that did not change.
+  // A full rebuild here used to restart every cycle and fire the first command of each group
+  // at once, so adding one timed command or changing one period reset the whole channel.
+  //   - a command whose timer is off, disabled or deleted loses its handle;
+  //   - a command with the same period as when it was armed keeps its handle untouched;
+  //   - a new command, or one whose period changed, is put into the widest gap between the
+  //     next fires of the commands already on that period (the stagger, kept incrementally),
+  //     or, alone on its period, one full period from now - never immediately.
+  syncChannelSchedule = (channel) =>
+  {
+    if (!this.client) return;
+    if (!this.commandTimers[channel]) this.commandTimers[channel] = {};
+    if (!this.timerMeta[channel]) this.timerMeta[channel] = {};
+    const timers = this.commandTimers[channel];
+    const meta = this.timerMeta[channel];
+
+    const wanted = new Map(); // cmdName -> period
+    for (const [cmdName, cmd] of Object.entries(this.CommandsDict[channel] || {})) {
+      if (cmd.enabled === false) continue;
+      const timerMs = parseInt(cmd.timer, 10);
+      if (timerMs > 0) wanted.set(cmdName, timerMs);
+    }
+
+    for (const cmdName of Object.keys(timers)) {
+      if (wanted.get(cmdName) !== meta[cmdName]?.period) {
+        clearTimeout(timers[cmdName]);
+        delete timers[cmdName];
+        delete meta[cmdName];
+      }
+    }
+
+    for (const [cmdName, period] of wanted) {
+      if (timers[cmdName]) continue;
+      this.scheduleCommand(channel, cmdName, this.freeSlotDelay(channel, period));
+    }
+  }
+
+  // Delay until the middle of the widest gap between the next fires of the commands already
+  // armed on `period` (offsets taken modulo the period, the gap is circular). None armed -> a
+  // full period. A command waiting out the offline/quiet-chat retry counts by its retry time,
+  // which is where it actually sits right now.
+  freeSlotDelay = (channel, period) =>
+  {
+    const now = Date.now();
+    const meta = this.timerMeta[channel] || {};
+    const offsets = Object.values(meta)
+      .filter((m) => m.period === period)
+      .map((m) => (((m.nextAt - now) % period) + period) % period)
+      .sort((a, b) => a - b);
+    if (offsets.length === 0) return period;
+    let bestStart = offsets[offsets.length - 1];
+    let bestGap = offsets[0] + period - bestStart;
+    for (let i = 1; i < offsets.length; i++) {
+      const gap = offsets[i] - offsets[i - 1];
+      if (gap > bestGap) { bestGap = gap; bestStart = offsets[i - 1]; }
+    }
+    // The middle of a gap that wraps around lands on "now" as 0 - the same slot one period on.
+    return Math.round((bestStart + bestGap / 2) % period) || period;
   }
 
   startCommandTimers = (client) =>
@@ -937,6 +1009,7 @@ class CustomCommands {
       }
     }
     this.commandTimers = {};
+    this.timerMeta = {};
     this.stopAutoRefresh();
   }
 
